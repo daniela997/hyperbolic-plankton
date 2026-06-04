@@ -34,19 +34,21 @@ _BACKBONES = {
 def build_backbone(name: str):
     """Load a frozen open_clip backbone.
 
-    Returns `(model, embed_dim)` where `model` is a frozen open_clip `CLIP` and
-    `embed_dim` is its shared image/text output dimension.
+    Returns `(model, embed_dim, preprocess)` where `model` is a frozen open_clip
+    `CLIP`, `embed_dim` is its shared image/text output dimension, and `preprocess` is
+    the eval image transform (PIL -> [3,224,224] tensor). CLIP and BioCLIP share the
+    identical open_clip preprocess, so the same transform serves both inits.
     """
     if name not in _BACKBONES:
         raise ValueError(f"Unknown backbone '{name}'. Options: {list(_BACKBONES)}")
     cfg = _BACKBONES[name]
-    model, _, _ = open_clip.create_model_and_transforms(
+    model, _, preprocess = open_clip.create_model_and_transforms(
         cfg["model_name"], pretrained=cfg["pretrained"]
     )
     model.eval()
     for p in model.parameters():
         p.requires_grad = False
-    return model, model.visual.output_dim
+    return model, model.visual.output_dim, preprocess
 
 
 class HyperbolicCLIP(nn.Module):
@@ -67,7 +69,7 @@ class HyperbolicCLIP(nn.Module):
     ):
         super().__init__()
         self.backbone_name = backbone
-        self.clip, backbone_dim = build_backbone(backbone)
+        self.clip, backbone_dim, self.preprocess = build_backbone(backbone)
         self.tokenizer = open_clip.get_tokenizer(_BACKBONES[backbone]["model_name"])
 
         # When False (projector-only) the backbone forward runs under no_grad to save

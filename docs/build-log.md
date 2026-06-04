@@ -201,28 +201,47 @@ seen pool.
 
 ---
 
-## Piece 5 — collator + train loop  ⬜ NEXT (plan captured for continuity)
+## Piece 5 — collator + train step  ✅ VERIFIED
 
-**Preprocess finding:** CLIP and BioCLIP use the **identical** open_clip preprocess
-(Resize224 bicubic → CenterCrop → RGB → ToTensor → Normalize, same CLIP mean/std). So one
-transform serves both inits. `build_backbone` currently DISCARDS the returned preprocess
-— thread it out so the collator can apply it (small change to model.py/build_backbone).
+`src/.../train.py`: `TaxonomyCollator` + `train_step`. Bridges data items → model+losses.
 
-**Plan:**
-1. `build_backbone` also returns `preprocess`; `HyperbolicCLIP` stores it (or expose it).
-2. **Collator**: list of `{image, taxonomy, proposed_label}` →
-   `(pixel_values [B,3,224,224], taxonomy_batch {rank: [B] list}, proposed_labels [B])`.
-   Transpose per-item taxonomy dicts into per-rank lists; apply preprocess to images.
-3. **Train step**: `img = encode_image(pix)`, `text_embs = encode_taxonomy(tax)`,
-   `loss = contrastive(img, deepest_text) + λ·SEL(img, text_embs, tax, RANKS)`. Use
-   `clamp_params()` each step. Verify: one step decreases loss on a tiny real batch;
-   grads reach the right params; runs on GPU for clip + bioclip.
-4. **Splits**: stratified train/val/test on the seen pool (11 datasets), unseen = the 4.
-5. Keep single-GPU first; DDP/grad-accum later. projector-only first, LoRA via flag.
+**Preprocess finding (confirmed):** CLIP and BioCLIP use the **identical** open_clip
+preprocess (Resize224 bicubic → CenterCrop → RGB → ToTensor → Normalize, same CLIP
+mean/std). One transform serves both inits. `build_backbone` previously DISCARDED it →
+now returns `(model, embed_dim, preprocess)` and `HyperbolicCLIP` stores `self.preprocess`.
 
-State at this point: 65 tests pass; HEAD = `efde554`. Pieces 1,2,3,4,7 verified.
+**What's built:**
+- `TaxonomyCollator(preprocess, ranks=RANKS)`: list of `{image, taxonomy, proposed_label}`
+  → `(pixel_values [B,3,224,224], taxonomy_batch {rank: [B] list} + full + _valid_ranks,
+  proposed_labels [B])`. Applies preprocess per-image + stacks; transposes per-item
+  taxonomy dicts into per-rank lists (None preserved). Shape mirrors scratchpad
+  `TaxonomyCollator`, but uses the open_clip transform (not an HF processor).
+- `train_step(model, pix, tax, optimizer, lambda_sel=1.0)`: one Adam step of
+  `contrastive(img, deepest_text) + λ·SEL`. CL target = each sample's **deepest valid
+  text** (`loss._deepest_text`, 1:1 positive per image); then `stacked_entailment_loss`.
+  Calls `model.clamp_params()` after `optimizer.step()`. Returns loss parts for logging.
+  Wiring follows scratchpad `train_epoch_sel_cl`.
 
-**Spec:** HF schema (planktonzilla.md) + scratchpad `dataset.py::build_taxonomy_texts`.
+**Verified (`tests/test_train.py`, 3 tests + 1 folded into test_model):**
+- Collator shapes + 1:1 per-rank alignment with items (None preserved), pixel dtype.
+- `train_step` runs, returns finite parts; **overfit check**: 21 steps on one fixed real
+  batch drives loss DOWN (clip, projector-only, CPU).
+- Grads reach `visual_proj`/`textual_proj`; frozen `visual.conv1` gets none.
+- `build_backbone` returns a working preprocess (PIL→[3,224,224]).
+- **GPU smoke (off-CI, real A5000):** train_step finite for clip AND bioclip; fp32
+  exp-map autocast active, no NaNs. **LoRA path composes**: `apply_lora` → 0.65%
+  trainable, `backbone_trainable=True`, loss 4.21→2.10 over 11 steps, lora_B gets grad.
+
+**Test convention:** package is NOT pip-installed; run with `PYTHONPATH=src python -m pytest`.
+
+State at this point: **68 tests pass**. Pieces 1,2,3,4,5,7 verified.
+
+**Still to do (Piece 5 leftovers → roll into Piece 6 / data plumbing):**
+- **Splits:** stratified train/val/test on the seen pool (11 datasets); unseen = the 4
+  held-out. Not yet built (the collator/step don't need it; eval does).
+- DataLoader wiring + a real multi-step training run; DDP/grad-accum deferred.
+
+**Spec:** HF schema (planktonzilla.md) + scratchpad `dataset.py` / `train_all_setups.py`.
 
 ### Environment fix (blocker found + resolved)
 - **Blocker:** `dino_plankton` (pyarrow 19) **cannot read** the Planktonzilla parquet

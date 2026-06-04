@@ -33,9 +33,14 @@ BACKBONES = ["clip", "bioclip"]
 
 @pytest.mark.parametrize("backbone", BACKBONES)
 def test_backbone_frozen_and_dim(backbone):
-    model, dim = build_backbone(backbone)
+    model, dim, preprocess = build_backbone(backbone)
     assert dim == 512
     assert all(not p.requires_grad for p in model.parameters())
+    # preprocess is a callable PIL -> [3,224,224] tensor transform
+    from PIL import Image as _Img
+
+    out = preprocess(_Img.new("RGB", (256, 200)))
+    assert out.shape == (3, 224, 224)
 
 
 @pytest.mark.parametrize("backbone", BACKBONES)
