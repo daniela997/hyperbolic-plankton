@@ -172,17 +172,32 @@ open_clip (both towers `nn.MultiheadAttention`), so we only need the MHA path, n
 
 ---
 
-## Piece 3 — data bridge (Planktonzilla HF → taxonomy dict)  ✅ DATA CACHED, code pending
+## Piece 3 — data bridge (Planktonzilla HF → taxonomy dict)  ✅ VERIFIED
+
+**Files:** `src/hyperbolic_plankton/data.py`, `tests/test_data.py`,
+`scripts/cache_planktonzilla.py`.
 
 - **Cache built:** `/scratch/daniela/planktonzilla_cache/plankton` — **3,746,982 rows**
-  (matches paper's 3.74M), 41 arrow shards, 30GB. `scripts/cache_planktonzilla.py`.
-- **`dataset` values resolved** (see planktonzilla.md): 15 lowercase sources; held-out 4
-  = `global_uvp5`, `planktoscope`, `planktonset1.0`, `syke_ifcb_2022` (821,212 rows);
-  in-domain pool = other 11 (~2.93M). Ragged taxonomy confirmed (`proposed_label` holds
-  deepest valid taxon; Order/Genus/Species often None).
-- **Still to do:** `HFTaxonomyDataset` (reads cache, maps `Species`→`species`,
-  `proposed_label`→`Folder`, emits `{image, taxonomy, folder}`) + collator + unseen
-  split helper. Verify: real rows, dict shape, ragged masks, split sizes.
+  (matches paper's 3.74M), 41 arrow shards, 30GB.
+- **`dataset` values resolved** (planktonzilla.md): held-out 4 = `global_uvp5`,
+  `planktoscope`, `planktonset1.0`, `syke_ifcb_2022`; in-domain = other 11.
+- **Implemented:** `build_taxonomy(row)` (cumulative-lineage rank strings, ragged None,
+  `folder`=proposed_label appended, `full`, `_valid_ranks`); `HFTaxonomyDataset` emitting
+  `{image: PIL, taxonomy, folder}`; `split_seen_unseen` (held-out 4 → unseen, rest → seen);
+  `RANKS` = kingdom..species + folder.
+- **Verification (7 tests, all on the REAL cache):** exact-value taxonomy (full lineage,
+  shallow-ragged, all-missing→"unknown", strip/nan/empty→None); dataset item shape +
+  PIL image; real-row consistency (each rank string is a prefix-extension of the prior);
+  seen/unseen split routes by source. 64 total across the suite.
+
+**Decisions:** cumulative (not independent) rank strings = the SEL paper / scratchpad
+default. `folder` appended as deepest rank so image→folder entailment has a leaf. No
+hard-negatives / transforms in v1 (model + collator handle preprocessing).
+
+**Still to do (pairs with Piece 5 train loop):** a collator that batches PIL images
+through the open_clip preprocess and groups `taxonomy` per-rank into the `{rank: [B]}`
+lists the model's `encode_taxonomy` expects + the stratified train/val/test split of the
+seen pool.
 
 **Spec:** HF schema (planktonzilla.md) + scratchpad `dataset.py::build_taxonomy_texts`.
 
