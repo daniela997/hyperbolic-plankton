@@ -85,8 +85,34 @@ exp_map0 lift, clamps) + scratchpad `model.py` (per-rank `encode_taxonomy` dict)
 
 ---
 
-## Next: Piece 3 — data bridge (Planktonzilla HF → taxonomy dict)
-Spec: HF schema (planktonzilla.md) + scratchpad `dataset.py::build_taxonomy_texts`.
-Stream + cache plankton subset to `/scratch/daniela/planktonzilla_cache`; map columns
-(`Species`→`species`, `proposed_label`→`Folder`); hold out the 4 paper datasets for the
-unseen split. Verify: load real rows, taxonomy dict shape, ragged handling, split sizes.
+## Piece 3 — data bridge (Planktonzilla HF → taxonomy dict)  🚧 IN PROGRESS
+
+**Spec:** HF schema (planktonzilla.md) + scratchpad `dataset.py::build_taxonomy_texts`.
+
+### Environment fix (blocker found + resolved)
+- **Blocker:** `dino_plankton` (pyarrow 19) **cannot read** the Planktonzilla parquet
+  shards — `OSError: Repetition level histogram size mismatch`. Reproduced reading a
+  single shard with raw pyarrow (no datasets), so it's purely a **pyarrow version**
+  issue, not a datasets/streaming one. `fedclip` (pyarrow 24) reads them fine.
+- **Fix:** upgraded **pyarrow 19 → 24** in `dino_plankton` (`datasets 2.21` pins
+  `pyarrow>=15`, no upper bound, so this is allowed). Verified: shard reads now; **all
+  32 Piece-1/2 tests still pass** (no regression). The pre-existing pip dependency
+  warnings (streamlit/pillow, fsspec, transformers) were already present and untouched.
+- **Lesson for the log:** always read these shards with **pyarrow ≥ 24**.
+
+### Caching (running)
+- `scripts/cache_planktonzilla.py`: `load_dataset` (downloads all 91GB / 187 shards to
+  the HF hub cache on `/scratch`) → `filter(plankton==True)` → `save_to_disk`
+  `/scratch/daniela/planktonzilla_cache/plankton`. Launched in background (multi-hour).
+- `/scratch` has 6.2TB free; `/home` and `/` are nearly full → everything on `/scratch`.
+
+### Still to do (once cache exists)
+- Dump the **complete set of `dataset`-column values** from the local cache (the
+  streaming sample only surfaced `global_uvp5`; values are **lowercase** like
+  `global_uvp5`, so the paper's "GlobalUVP5/PlanktoScope/PlanktonSet1.0/SYKE-IFCB-2022"
+  need mapping to the real strings — the open `[unknown]` in planktonzilla.md).
+- `HFTaxonomyDataset`: reads the cached subset, maps `Species`→`species`,
+  `proposed_label`→`Folder`, emits the `{image, taxonomy, folder}` dict the model's
+  `encode_taxonomy` + (future) collator expect. Reuse `build_taxonomy_texts` logic.
+- Unseen split: hold out the 4 paper datasets via the `dataset` column.
+- Verify: load real rows, taxonomy dict shape, ragged handling, split sizes.
