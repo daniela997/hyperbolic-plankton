@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ipynb_checkpoints/
+
+# Envs
+.venv/
+venv/
+
+# Data / caches / outputs (large, machine-specific)
+/scratch/
+planktonzilla_cache/
+checkpoints/
+outputs/
+wandb/
+*.pt
+*.pth
+
+# OS
+.DS_Store

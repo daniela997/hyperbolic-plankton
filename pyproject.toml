@@ -1,0 +1,27 @@
+[project]
+name = "hyperbolic-plankton"
+version = "0.0.1"
+description = "Parameter-efficient hyperbolic adaptation of CLIP for plankton taxonomy"
+requires-python = ">=3.10"
+# Deps are provided by the `dino_plankton` conda env (torch, open_clip, datasets,
+# transformers, peft). Listed here for reference, not installed by this file.
+dependencies = [
+    "torch",
+    "open_clip_torch",
+    "datasets",
+    "transformers",
+    "peft",
+    "pandas",
+    "scikit-learn",
+    "numpy",
+]
+
+[project.optional-dependencies]
+dev = ["pytest"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
