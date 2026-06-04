@@ -47,7 +47,46 @@ encoder variant, which is not in the v1 plan.)
 
 ---
 
-## Next: Piece 2 — model (frozen open_clip backbone + projection + exp_map0 lift)
-Spec: HAC `AdaptedCLIP` (geometry) + our `model.py`. Verify: frozen params get no grad;
-projected points lie on the hyperboloid (`<x,x>_L ≈ -1/curv`); forward runs on a dummy
-batch for both CLIP and BioCLIP open_clip backbones.
+## Piece 2 — `model.py` (frozen open_clip backbone + projection + lift)  ✅ VERIFIED
+
+**Files:** `src/hyperbolic_plankton/model.py`, `tests/test_model.py`.
+
+**Spec source:** HAC `AdaptedCLIP` (geometry: freeze, proj heads, alpha/curv scalars,
+exp_map0 lift, clamps) + scratchpad `model.py` (per-rank `encode_taxonomy` dict).
+
+**Implemented:** `build_backbone("clip"|"bioclip")`, `HyperbolicCLIP` with
+`encode_image`, `encode_text(list[str])`, `encode_taxonomy(dict)`, `clamp_params`.
+- **clip** = `ViT-B-16-quickgelu` / `openai` (quickgelu variant avoids the activation
+  mismatch warning for OpenAI weights).
+- **bioclip** = `hf-hub:imageomics/bioclip` (downloads on first use; verified working).
+- embed_dim = 512 (shared image/text output of ViT-B/16).
+
+**Verification (11 tests, all pass; 32 total across the suite):**
+- Both backbones load; frozen (no param has `requires_grad`); output dim 512.
+- Image + text embeddings lie on the hyperboloid (`<x,x>_L = -1/curv`, atol 1e-3).
+- Backward pass: **frozen backbone gets NO gradient**; projection heads + MERU scalars
+  DO. (This is the projector-only guarantee — verified, not assumed.)
+- `encode_taxonomy`: correct per-rank shapes, `{rank}_valid` masks, None→zeros, `_`-keys
+  skipped, valid rows on the manifold.
+- `clamp_params` keeps alpha ≤ 0 and logit_scale ≤ ln(100).
+
+**Decisions / findings:**
+- **Loss is NOT in the model** (unlike HAC's `AdaptedCLIP.forward`). The model only
+  encodes/projects; loss lives in Piece 4. Keeps the model single-purpose + testable.
+- Built `encode_taxonomy` now (one piece ahead of SEL) per user request; tested
+  directly without a loss consumer.
+- **Conceptual correction worth remembering:** in the space-components representation,
+  EVERY vector satisfies `<x,x>_L = -1/curv` by construction (time is defined as
+  `sqrt(1/curv+||x||²)`), so that constraint can't distinguish tangent from manifold.
+  `project=True`'s real effect is the geodesic placement (norm change via exp_map0).
+  Tests check the norm change, not the (always-true) constraint.
+- `_lift` autocasts to fp32 only on CUDA (CPU fp32-autocast is unsupported + a no-op).
+- Deferred: LoRA (Piece 7), parallel-transport/depth-factored encoders (not in v1).
+
+---
+
+## Next: Piece 3 — data bridge (Planktonzilla HF → taxonomy dict)
+Spec: HF schema (planktonzilla.md) + scratchpad `dataset.py::build_taxonomy_texts`.
+Stream + cache plankton subset to `/scratch/daniela/planktonzilla_cache`; map columns
+(`Species`→`species`, `proposed_label`→`Folder`); hold out the 4 paper datasets for the
+unseen split. Verify: load real rows, taxonomy dict shape, ragged handling, split sizes.
