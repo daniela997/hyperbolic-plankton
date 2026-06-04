@@ -70,6 +70,12 @@ class HyperbolicCLIP(nn.Module):
         self.clip, backbone_dim = build_backbone(backbone)
         self.tokenizer = open_clip.get_tokenizer(_BACKBONES[backbone]["model_name"])
 
+        # When False (projector-only) the backbone forward runs under no_grad to save
+        # memory — correct because every backbone param is frozen. When LoRA is applied
+        # (apply_lora sets this True), the graph must stay intact so gradients reach the
+        # adapters; freezing is then enforced by requires_grad alone (as HAC does).
+        self.backbone_trainable = False
+
         self.embed_dim = embed_dim or backbone_dim
 
         # Learnable projection heads (trained from scratch; backbone is frozen).
@@ -118,14 +124,14 @@ class HyperbolicCLIP(nn.Module):
         return L.exp_map0(feats, self.curvature)
 
     def encode_image(self, pixel_values: torch.Tensor, project: bool = True) -> torch.Tensor:
-        with torch.no_grad():
+        with torch.set_grad_enabled(self.backbone_trainable):
             feats = self.clip.encode_image(pixel_values, normalize=False)
         feats = self.visual_proj(feats)
         return self._lift(feats, self.visual_alpha) if project else feats
 
     def encode_text(self, texts: list[str], project: bool = True) -> torch.Tensor:
         tokens = self.tokenizer(texts).to(self.device)
-        with torch.no_grad():
+        with torch.set_grad_enabled(self.backbone_trainable):
             feats = self.clip.encode_text(tokens, normalize=False)
         feats = self.textual_proj(feats)
         return self._lift(feats, self.textual_alpha) if project else feats

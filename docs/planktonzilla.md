@@ -218,8 +218,19 @@ The paper trains **four models from four inits**, two architectures:
   join string vs templated prompt) — built off-repo.
 - **[unknown]** Exact pretrained init for the supervised classifier row (almost
   certainly fine-tune-from-pretrained, but not literally stated).
-- **[unknown]** Whether the live HF `dataset` column strings exactly match the paper
-  names "GlobalUVP5 / PlanktoScope / PlanktonSet1.0 / SYKE-IFCB-2022" (need to dump
-  unique values before hardcoding the held-out split).
+- **[RESOLVED]** The `dataset` column strings are **lowercase** and differ from the
+  paper's display names. Full set (15 sources) + the 4 held-out mappings, from the
+  cached 3,746,982-row plankton subset:
+  - Held-out (unseen) — paper → actual string (rows): GlobalUVP5 → `global_uvp5`
+    (576,303); PlanktoScope → `planktoscope` (130,797); PlanktonSet1.0 →
+    `planktonset1.0` (51,163); SYKE-IFCB-2022 → `syke_ifcb_2022` (62,949).
+    **Held-out total = 821,212 rows.**
+  - In-domain training pool = the other 11: `zooscan` (993,092), `zoocamnet`
+    (861,441), `whoi` (497,716), `jedioceans` (237,364), `flowcamnet` (103,372),
+    `medplanktonset` (77,271), `isiisnet` (60,992), `uvp6net` (48,959),
+    `sykezooscan2024` (21,898), `zoolake` (17,265), `lensless` (6,400). ≈ 2.93M rows.
+  - Confirmed ragged taxonomy: many rows have `Order=Genus=Species=None` with
+    `proposed_label` holding the deepest valid taxon (e.g. `acantharia`,
+    `dinophyceae`) — validating the loss's `_valid` masking.
 - Planktonzilla v1 trained checkpoints not yet public — for now we compare against
   the **paper's reported Table 2/3 numbers**.

@@ -122,7 +122,67 @@ SEL structure is the 2025 paper's, verified by our exact-value tests, not by HAC
 
 ---
 
-## Piece 3 — data bridge (Planktonzilla HF → taxonomy dict)  🚧 IN PROGRESS (download running)
+## Piece 7 — LoRA on the open_clip backbone  ✅ VERIFIED
+
+**Files:** `src/hyperbolic_plankton/plain_mha.py`, `src/hyperbolic_plankton/lora.py`,
+`tests/test_plain_mha.py`, `tests/test_lora.py`. Needs `peft` (installed 0.19.1).
+
+**Spec source:** HAC `plain_mha.py` + `scripts/train.py` + `train_hac_vit_b_lora.py`.
+
+### 7a — PlainMHA (numerical-equivalence gate)
+open_clip uses `nn.MultiheadAttention` (fused Q/K/V `in_proj_weight`) in BOTH towers,
+which PEFT can't target. Ported only HAC's `PlainMultiHeadAttention` path (not the timm
+path — open_clip has no timm attention) → split q/k/v/o linears. **Gate verified:** the
+swap is bit-for-bit identical to `nn.MultiheadAttention` (no mask AND causal mask), and
+a full open_clip model's `encode_image/encode_text` are unchanged after swapping all 24
+MHAs (atol 1e-4). This guarantees the pretrained backbone is uncorrupted before LoRA.
+
+### 7b — LoRA application
+`apply_lora`: swap MHA → `get_peft_model` (q,k,v,o; last 4 visual / last 8 text blocks;
+r=alpha, rsLoRA) → unfreeze final LN. Trainable = LoRA + final LNs + projection heads +
+MERU scalars; <10% of params.
+
+**Two real issues found + fixed (methodical approach earned its keep):**
+1. **target-module suffix collision.** PEFT matches a `target_modules` *list* by name
+   suffix; the text path `transformer.resblocks.{i}...` is a suffix of the visual path
+   `visual.transformer.resblocks.{i}...`, so a list wrongly LoRA'd visual blocks 4–11
+   instead of 8–11. **Fix:** pass a `str` regex (PEFT uses `re.fullmatch`) anchored to
+   distinguish `visual.transformer...` from the bare text `transformer...`.
+2. **`no_grad` severed LoRA's gradient graph (real bug in Piece 2).** Our model wrapped
+   the backbone forward in `torch.no_grad()` (correct for projector-only, saves memory).
+   But LoRA needs the graph intact to receive gradients. **Fix:** conditional
+   `set_grad_enabled(self.backbone_trainable)` — `apply_lora` sets `backbone_trainable=
+   True`. **This is exactly how HAC does it** (see Q&A below): HAC never uses `no_grad`,
+   relying on `requires_grad=False` alone, so the graph flows to adapters while frozen
+   base weights accumulate no grad.
+
+**LoRA semantics note (was a test bug, not a code bug):** `lora_B` is zero-initialized
+(canonical LoRA → adapter starts as a no-op). So on the FIRST backward,
+`grad(lora_A)=lora_B^T·grad_out=0` while `grad(lora_B)≠0`. The test now checks `lora_B`
+gets grad (proves the adapter is in the live graph); from step 2 onward `lora_A` trains.
+
+**How HAC loads CLIP + applies PEFT (answer recorded):** HAC does NOT use open_clip — it
+builds a timm ViT (visual) + MERU `TransformerTextEncoder` (text) from a local `.pth`.
+PEFT sequence (`scripts/train.py:211`): freeze both encoders → `replace_mha_with_plain`
+(both, since timm + MERU use different attention) → `get_peft_model` per encoder →
+unfreeze final LN. Projection heads/scalars live on `AdaptedCLIP`, never frozen. We use
+open_clip (both towers `nn.MultiheadAttention`), so we only need the MHA path, not timm.
+
+**8 tests (4 plain_mha + 4 lora); 57 total across the suite.**
+
+---
+
+## Piece 3 — data bridge (Planktonzilla HF → taxonomy dict)  ✅ DATA CACHED, code pending
+
+- **Cache built:** `/scratch/daniela/planktonzilla_cache/plankton` — **3,746,982 rows**
+  (matches paper's 3.74M), 41 arrow shards, 30GB. `scripts/cache_planktonzilla.py`.
+- **`dataset` values resolved** (see planktonzilla.md): 15 lowercase sources; held-out 4
+  = `global_uvp5`, `planktoscope`, `planktonset1.0`, `syke_ifcb_2022` (821,212 rows);
+  in-domain pool = other 11 (~2.93M). Ragged taxonomy confirmed (`proposed_label` holds
+  deepest valid taxon; Order/Genus/Species often None).
+- **Still to do:** `HFTaxonomyDataset` (reads cache, maps `Species`→`species`,
+  `proposed_label`→`Folder`, emits `{image, taxonomy, folder}`) + collator + unseen
+  split helper. Verify: real rows, dict shape, ragged masks, split sizes.
 
 **Spec:** HF schema (planktonzilla.md) + scratchpad `dataset.py::build_taxonomy_texts`.
 
