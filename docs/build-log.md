@@ -199,6 +199,29 @@ through the open_clip preprocess and groups `taxonomy` per-rank into the `{rank:
 lists the model's `encode_taxonomy` expects + the stratified train/val/test split of the
 seen pool.
 
+---
+
+## Piece 5 — collator + train loop  ⬜ NEXT (plan captured for continuity)
+
+**Preprocess finding:** CLIP and BioCLIP use the **identical** open_clip preprocess
+(Resize224 bicubic → CenterCrop → RGB → ToTensor → Normalize, same CLIP mean/std). So one
+transform serves both inits. `build_backbone` currently DISCARDS the returned preprocess
+— thread it out so the collator can apply it (small change to model.py/build_backbone).
+
+**Plan:**
+1. `build_backbone` also returns `preprocess`; `HyperbolicCLIP` stores it (or expose it).
+2. **Collator**: list of `{image, taxonomy, proposed_label}` →
+   `(pixel_values [B,3,224,224], taxonomy_batch {rank: [B] list}, proposed_labels [B])`.
+   Transpose per-item taxonomy dicts into per-rank lists; apply preprocess to images.
+3. **Train step**: `img = encode_image(pix)`, `text_embs = encode_taxonomy(tax)`,
+   `loss = contrastive(img, deepest_text) + λ·SEL(img, text_embs, tax, RANKS)`. Use
+   `clamp_params()` each step. Verify: one step decreases loss on a tiny real batch;
+   grads reach the right params; runs on GPU for clip + bioclip.
+4. **Splits**: stratified train/val/test on the seen pool (11 datasets), unseen = the 4.
+5. Keep single-GPU first; DDP/grad-accum later. projector-only first, LoRA via flag.
+
+State at this point: 65 tests pass; HEAD = `efde554`. Pieces 1,2,3,4,7 verified.
+
 **Spec:** HF schema (planktonzilla.md) + scratchpad `dataset.py::build_taxonomy_texts`.
 
 ### Environment fix (blocker found + resolved)
