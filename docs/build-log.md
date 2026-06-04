@@ -85,7 +85,44 @@ exp_map0 lift, clamps) + scratchpad `model.py` (per-rank `encode_taxonomy` dict)
 
 ---
 
-## Piece 3 — data bridge (Planktonzilla HF → taxonomy dict)  🚧 IN PROGRESS
+## Piece 4 — `loss.py` (contrastive + SEL)  ✅ VERIFIED
+
+**Files:** `src/hyperbolic_plankton/loss.py`, `tests/test_loss.py`.
+
+**Spec source:** 2025 Hyperbolic Taxonomies paper (SEL Eq. 3) + scratchpad `loss.py`.
+**Scope (v1 core):** `hyperbolic_contrastive_loss`, `entailment_pos/neg`, `sel_intra`,
+`sel_inter`, `stacked_entailment_loss`. Deferred: UNCHA, hard-neg images, SupCon,
+angular alignment (later ablations).
+
+**Verification strategy (important — see the Q&A that shaped it):**
+- We **trust** MERU's `oxy_angle`/`half_aperture` math (established prior art; 3
+  published codebases — MERU, HAC, scratchpad — agree, and our `lorentz.py` matched
+  HAC to 1e-6 in Piece 1).
+- We **independently verify OUR loss composition** — the parts we could have gotten
+  wrong — with **exact-value tests** that compute the expected loss by hand from the
+  trusted primitives:
+  - `sel_intra` == hand-computed mean of `relu(angle-aperture)` over masked pairs (1e-6).
+  - pos/neg masking by parent-rank label routes cross-pairs correctly.
+  - **grid orientation** (child-rows / parent-cols): asserts we match the convention
+    AND that the transpose gives a different answer (catches a silent transpose bug).
+  - **Eq.3 denominator** = exact supervised-edge count (ragged edge → `edge1/2`, not
+    `edge1/1`).
+  - `_deepest_text` picks the leaf-most valid rank + its label per sample.
+- The scratchpad cross-check is kept but **documented as NON-independent** (same MERU
+  lineage; can only confirm we copied the formula identically, not that it's correct).
+  Matched at atol 2e-2 due to the known eps gap (scratchpad 1e-4 vs ours 1e-8).
+
+**HAC template note:** HAC's entailment is the SAME `relu(angle - aperture)` hinge
+(`AdaptedCLIP.forward`, models.py:828) — confirms our hinge — but HAC multiplies
+aperture by a threshold (0.7 inter / 1.2 intra, HyCoCLIP-specific) and has **no SEL**
+(it does object-scene/box entailment). So HAC templates the hinge; the stacked-rank
+SEL structure is the 2025 paper's, verified by our exact-value tests, not by HAC.
+
+**17 loss tests pass (49 total across the suite).**
+
+---
+
+## Piece 3 — data bridge (Planktonzilla HF → taxonomy dict)  🚧 IN PROGRESS (download running)
 
 **Spec:** HF schema (planktonzilla.md) + scratchpad `dataset.py::build_taxonomy_texts`.
 
