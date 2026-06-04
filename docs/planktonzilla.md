@@ -50,10 +50,29 @@ parquet (images embedded). Confirmed schema from the datasets-server `info` endp
 dataset** — no WoRMS querying needed. This is what makes hierarchical/entailment
 losses feasible. **[stated — confirmed from live metadata]**
 
-Class label choice: we use **`proposed_label`** as the class ("Folder" equivalent)
-because it's WoRMS-harmonized and cleaner than `original_label`. Note it sits at the
-**deepest valid rank**, so the class space is taxonomically heterogeneous (some
-classes are genus-level, some species-level). **[decision]**
+Class label choice: we use **`proposed_label`** as the class identity because it's
+WoRMS-harmonized and cleaner than `original_label`. It sits at the **deepest valid
+rank**, so the class space is taxonomically heterogeneous (some classes genus-level,
+some species-level). **[decision]**
+
+**`proposed_label` vs the deepest rank column** (measured on 208k sampled rows): **[stated]**
+- 94.3% — `proposed_label` == the deepest non-null rank value (simple case).
+- **5.7% — they differ**, and the pattern is meaningful: when `Species` is present,
+  `proposed_label` is the **full binomial** (e.g. `"aegina citrea"`) while the `Species`
+  column holds only the **specific epithet** (`"citrea"`). So `proposed_label` is the
+  scientifically correct species id, *richer* than the rank columns, not redundant.
+- 0.02% — no rank columns at all (proposed_label is the only label).
+- **Design consequence:** `proposed_label` is used **only as the class label** (for
+  contrastive positives / macro-F1), **not** as an extra taxonomy rank/string — that
+  avoids binomial-overlap duplication (`"...aegina citrea aegina citrea"`) and keeps the
+  per-rank lineage clean. SEL-inter entails the image into the deepest valid REAL rank.
+  We renamed the field `folder`→`proposed_label` (the "folder" name was an imagefolder
+  artifact from the scratchpad).
+
+**Data-quality note:** the dataset contains a few **undecodable images**
+(`PIL.UnidentifiedImageError`). `HFTaxonomyDataset` casts the image column to
+`decode=False` and decodes inside a try, falling back to a blank RGB so one bad image
+never crashes a training batch. **[stated]**
 
 ---
 

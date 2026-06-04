@@ -1,8 +1,8 @@
 """Data bridge — Planktonzilla cache → taxonomy items (Piece 3).
 
 Reads the cached plankton subset (`scripts/cache_planktonzilla.py` output) and yields
-items shaped for the model: `{image, taxonomy, folder}` where `taxonomy` is the per-rank
-dict the model's `encode_taxonomy` consumes.
+items shaped for the model: `{image, taxonomy, proposed_label}` where `taxonomy` is the
+per-rank dict the model's `encode_taxonomy` consumes and `proposed_label` is the class id.
 
 Spec source: HF schema (docs/planktonzilla.md) + scratchpad
 `mine/hyperbolic/dataset.py::build_taxonomy_texts`. v1 scope: cumulative-lineage rank
@@ -12,12 +12,21 @@ strings + ragged `_valid` tracking. No hard negatives / independent-ranks / tran
 
 from __future__ import annotations
 
+import io
+
+import datasets
+from PIL import Image
 from torch.utils.data import Dataset
 
-# HF columns (coarse -> fine) and the lowercase rank keys we emit. `Folder` (the class
-# identity) is appended as the deepest rank so image->folder entailment has a leaf.
+_BLANK_IMAGE = Image.new("RGB", (224, 224))
+
+# HF taxonomic-rank columns (coarse -> fine) and the lowercase rank keys we emit.
+# `proposed_label` is the WoRMS-harmonised class identity (often the full binomial, e.g.
+# "aegina citrea", while Species holds only "citrea"); it is used as the CLASS LABEL, not
+# as an extra taxonomy rank — so it is NOT in RANKS. SEL-inter entails the image into the
+# deepest valid REAL rank (species/genus/...), and proposed_label defines positives/macro-F1.
 _HF_RANK_COLUMNS = ["Kingdom", "Phylum", "Class", "Order", "Family", "Genus", "Species"]
-RANKS = [c.lower() for c in _HF_RANK_COLUMNS] + ["folder"]
+RANKS = [c.lower() for c in _HF_RANK_COLUMNS]
 
 # The 4 source datasets held out for unseen-species evaluation (lowercase `dataset`
 # column values; see docs/planktonzilla.md).
@@ -35,12 +44,14 @@ def _clean(v) -> str | None:
 
 
 def build_taxonomy(row: dict) -> dict:
-    """Build the per-rank taxonomy dict for one row.
+    """Build the per-rank taxonomy dict for one row (real ranks only).
 
     Each rank's string is the **cumulative** lineage through that rank (e.g. family =
-    "kingdom phylum class order family"); missing ranks are None. `folder` is
-    `proposed_label`. `full` is the deepest cumulative string (or "unknown").
-    Includes `_valid_ranks` (list of populated rank keys).
+    "kingdom phylum class order family"); missing ranks are None. `full` is the deepest
+    cumulative string (or "unknown"). `_valid_ranks` lists the populated rank keys.
+
+    `proposed_label` is intentionally NOT a rank here — it is the class identity, carried
+    separately by `HFTaxonomyDataset` (it is often a binomial overlapping Genus+Species).
     """
     taxonomy: dict = {}
     cumulative: list[str] = []
@@ -56,35 +67,37 @@ def build_taxonomy(row: dict) -> dict:
         else:
             taxonomy[key] = None
 
-    folder = _clean(row.get("proposed_label"))
-    if folder is not None:
-        cumulative.append(folder)
-        taxonomy["folder"] = " ".join(cumulative)
-        valid_ranks.append("folder")
-    else:
-        taxonomy["folder"] = None
-
     taxonomy["full"] = " ".join(cumulative) if cumulative else "unknown"
     taxonomy["_valid_ranks"] = valid_ranks
     return taxonomy
 
 
 class HFTaxonomyDataset(Dataset):
-    """Wraps the cached HF plankton dataset, emitting `{image, taxonomy, folder}`."""
+    """Wraps the cached HF plankton dataset, emitting `{image, taxonomy, proposed_label}`.
+
+    `proposed_label` is the class identity (WoRMS-harmonised label) used for contrastive
+    positives and macro-F1; `taxonomy` holds the per-rank cumulative lineage strings.
+    """
 
     def __init__(self, hf_dataset):
-        self.ds = hf_dataset
+        # Disable HF's eager image decode: with decode=True, `ds[idx]` would raise on a
+        # corrupt cell before we can catch it. With decode=False we get raw {bytes,path}
+        # and decode ourselves inside a try (the dataset has a few undecodable images).
+        self.ds = hf_dataset.cast_column("image", datasets.Image(decode=False))
 
     def __len__(self) -> int:
         return len(self.ds)
 
     def __getitem__(self, idx: int) -> dict:
         row = self.ds[idx]
-        taxonomy = build_taxonomy(row)
+        try:
+            image = Image.open(io.BytesIO(row["image"]["bytes"])).convert("RGB")
+        except Exception:
+            image = _BLANK_IMAGE.copy()
         return {
-            "image": row["image"],  # PIL.Image (HF decodes)
-            "taxonomy": taxonomy,
-            "folder": _clean(row["proposed_label"]) or "unknown",
+            "image": image,
+            "taxonomy": build_taxonomy(row),
+            "proposed_label": _clean(row["proposed_label"]) or "unknown",
         }
 
 

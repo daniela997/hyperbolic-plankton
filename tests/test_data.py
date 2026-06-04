@@ -1,9 +1,9 @@
 """Verification for src/hyperbolic_plankton/data.py (piece 3).
 
 Uses the real cached plankton subset (small .select() slices to stay fast). Checks:
-  1. build_taxonomy: cumulative strings, ragged None handling, folder=proposed_label,
+  1. build_taxonomy: cumulative strings (real ranks only), ragged None handling,
      full + _valid_ranks — by exact hand-computed values on synthetic + real rows.
-  2. HFTaxonomyDataset emits {image, taxonomy, folder} with a PIL image.
+  2. HFTaxonomyDataset emits {image, taxonomy, proposed_label} with a PIL image.
   3. split_seen_unseen routes the 4 held-out sources to unseen, others to seen.
 """
 
@@ -45,14 +45,14 @@ def test_build_taxonomy_cumulative_full_lineage():
     assert t["phylum"] == "chromista heterokontophyta"
     assert t["genus"] == "chromista heterokontophyta bacillariophyceae fragilariales fragilariaceae diatoma"
     assert t["species"] is None  # missing -> None
-    # folder = proposed_label appended to the cumulative chain
-    assert t["folder"] == "chromista heterokontophyta bacillariophyceae fragilariales fragilariaceae diatoma diatoma"
-    assert t["full"] == t["folder"]
-    assert t["_valid_ranks"] == ["kingdom", "phylum", "class", "order", "family", "genus", "folder"]
+    # proposed_label is NOT a taxonomy rank; full = deepest real-rank cumulative string
+    assert "folder" not in t and "proposed_label" not in t
+    assert t["full"] == t["genus"]
+    assert t["_valid_ranks"] == ["kingdom", "phylum", "class", "order", "family", "genus"]
 
 
 def test_build_taxonomy_shallow_ragged():
-    """A coarse-only row (only Kingdom + a proposed label)."""
+    """A coarse-only row (only Kingdom present among ranks)."""
     row = {
         "Kingdom": "chromista", "Phylum": None, "Class": None, "Order": None,
         "Family": None, "Genus": None, "Species": None, "proposed_label": "acantharia",
@@ -60,8 +60,8 @@ def test_build_taxonomy_shallow_ragged():
     t = build_taxonomy(row)
     assert t["kingdom"] == "chromista"
     assert t["phylum"] is None and t["species"] is None
-    assert t["folder"] == "chromista acantharia"
-    assert t["_valid_ranks"] == ["kingdom", "folder"]
+    assert t["full"] == "chromista"
+    assert t["_valid_ranks"] == ["kingdom"]
 
 
 def test_build_taxonomy_all_missing():
@@ -80,7 +80,7 @@ def test_build_taxonomy_strips_and_nulls():
     assert t["kingdom"] == "animalia"  # stripped
     assert t["phylum"] is None  # "nan" -> None
     assert t["class"] is None  # "" -> None
-    assert t["folder"] == "animalia copepoda"
+    assert t["full"] == "animalia"  # only Kingdom valid among ranks
 
 
 # --------------------------------------------------------------------------------
@@ -93,26 +93,38 @@ def test_dataset_item_shape(cache):
     ds = HFTaxonomyDataset(cache.select(range(4)))
     assert len(ds) == 4
     item = ds[0]
-    assert set(item.keys()) == {"image", "taxonomy", "folder"}
+    assert set(item.keys()) == {"image", "taxonomy", "proposed_label"}
     assert isinstance(item["image"], PILImage)
-    assert isinstance(item["folder"], str) and item["folder"]
+    assert isinstance(item["proposed_label"], str) and item["proposed_label"]
     # taxonomy has every rank key + full + _valid_ranks
     for r in RANKS:
         assert r in item["taxonomy"]
     assert "full" in item["taxonomy"] and "_valid_ranks" in item["taxonomy"]
 
 
+def test_dataset_handles_corrupt_image(cache):
+    """A row whose image bytes are unreadable must yield a blank RGB, not raise."""
+    import datasets
+    from PIL.Image import Image as PILImage
+
+    # craft a 1-row dataset with deliberately invalid image bytes
+    base = cache.select(range(1)).cast_column("image", datasets.Image(decode=False))
+    bad = base.map(lambda r: {"image": {"bytes": b"not-an-image", "path": None}})
+    ds = HFTaxonomyDataset(bad)
+    item = ds[0]
+    assert isinstance(item["image"], PILImage)
+    assert item["image"].size == (224, 224)  # the blank fallback
+
+
 def test_dataset_real_taxonomy_consistency(cache):
-    """folder string should end with the proposed_label; valid ranks form a prefix."""
+    """each rank's cumulative string is a prefix-extension of the previous rank's."""
     ds = HFTaxonomyDataset(cache.select(range(0, 300000, 50000)))
     for i in range(len(ds)):
         t = ds[i]["taxonomy"]
         vr = t["_valid_ranks"]
-        # valid ranks are a contiguous prefix of RANKS up to the deepest present
-        # (allowing folder always last); each present rank's string contains the prior
+        # each present rank's cumulative string extends the previous one (prefix nesting)
         for j in range(1, len(vr)):
-            if vr[j] != "folder":
-                assert t[vr[j]].startswith(t[vr[j - 1]]), (vr, t[vr[j]])
+            assert t[vr[j]].startswith(t[vr[j - 1]]), (vr, t[vr[j]])
 
 
 # --------------------------------------------------------------------------------
