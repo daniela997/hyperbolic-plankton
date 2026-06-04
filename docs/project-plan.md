@@ -95,9 +95,16 @@ direct fit.
 - **Backbone:** frozen **CLIP (OpenAI)** AND **BioCLIP**, both ViT-B/16, via
   `open_clip`. Both inits so we show the efficiency win holds for generic and bio
   pretraining, matching the paper's two B/16 inits.
-- **Projector:** trainable hyperbolic projection into the Lorentz model (MERU-style),
-  reusing `/home/daniela/mine/hyperbolic/model.py` (`HyperbolicTaxonomyModel`).
-  Backbone frozen → only projector + MERU scalars (curv, alphas, logit_scale) train.
+- **Projector (v1):** a single trainable linear head per modality
+  (`visual_proj`/`textual_proj`, `nn.Linear`, MERU init) between the frozen backbone
+  and the `exp_map0` lift — **the HAC `AdaptedCLIP` projector**, re-implemented and
+  verified in `src/hyperbolic_plankton/model.py` (Piece 2). Backbone frozen → only the
+  projection heads + MERU scalars (curv, alphas, logit_scale) train.
+  - The scratchpad `model.py` is a *superset* (MLP / depth-factored / parallel-
+    transport projector variants); v1 uses only the plain linear one, matching HAC.
+  - **Depth-factored projector — Tier-1 experiment, deferred (see §5).** Worth
+    exploring because it ties projector output *radius* to taxonomic rank, which is
+    exactly the hierarchy signal we care about (hyperbolic radius = specificity).
 - **Loss:** hyperbolic contrastive + stacked entailment (SEL), reusing
   `/home/daniela/mine/hyperbolic/loss.py` (already implements SEL-intra/inter,
   MERU contrastive, ragged-rank validity masks, hard negatives, UNCHA).
@@ -149,6 +156,11 @@ direct fit.
 5. SimpleShot 1-/5-shot (×5 seeds) to fill the Table-3 shape.
 6. Within-hyperbolic ablation: plain-CL vs +SEL/entailment (attributes the win to
    hyperbolic *structure* vs just frozen-projector fine-tuning).
+7. **Depth-factored projector** vs the plain linear projector: replace the linear head
+   with a unit-direction head + a per-rank depth (radius) head, so taxonomic depth maps
+   onto hyperbolic radius explicitly (scratchpad `use_depth_factored`). Hypothesis: a
+   natural fit for taxonomy that should help coarse-rank unseen recovery. Add only
+   after the v1 linear-projector baseline works.
 
 **Tier 2 — deferred:**
 7. RCME-style radial-Euclidean baseline (the controlled geometry comparison → Track-1
