@@ -160,6 +160,9 @@ def main():
     ap.add_argument("--lr", type=float, default=2.5e-4)
     ap.add_argument("--wd", type=float, default=0.2)
     ap.add_argument("--lambda-sel", type=float, default=1.0)
+    ap.add_argument("--freeze-curv", action="store_true",
+                    help="hold curvature fixed at init (removes the curvature-collapse "
+                         "shortcut so SEL must update embeddings, not shrink cones)")
     ap.add_argument("--lora-r", type=int, default=128)
     ap.add_argument("--num-workers", type=int, default=6)
     ap.add_argument("--ckpt-every", type=int, default=2000)
@@ -186,7 +189,10 @@ def main():
         f"accum={args.accum} -> effective batch={eff_batch}  iters={args.iters}")
 
     # model + LoRA
-    model = apply_lora(HyperbolicCLIP(backbone=args.backbone), r=args.lora_r, alpha=args.lora_r)
+    model = apply_lora(
+        HyperbolicCLIP(backbone=args.backbone, learn_curv=not args.freeze_curv),
+        r=args.lora_r, alpha=args.lora_r,
+    )
     model.to(device)
     if is_main():
         c = count_trainable(model)
