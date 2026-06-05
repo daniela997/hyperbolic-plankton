@@ -161,3 +161,51 @@ def test_end_to_end_real_model():
     assert r["full"]["f1"] == 1.0
     for rank in RANKS:
         assert 0.0 <= r[rank]["f1"] <= 1.0
+
+
+# --------------------------------------------------------------------------------
+# 5. geometry diagnostics
+# --------------------------------------------------------------------------------
+
+def test_geometry_stats_keys_and_ranges():
+    """geometry_stats returns per-rank radius/aperture + per-edge entail_ok, in valid
+    ranges, on a tiny synthetic taxonomy batch (no backbone needed for the math, but we
+    go through the model so the encode path is exercised)."""
+    from hyperbolic_plankton.eval import geometry_stats
+    from hyperbolic_plankton.model import HyperbolicCLIP
+
+    model = HyperbolicCLIP(backbone="clip").eval()
+    # ragged batch: 2 samples, kingdom+phylum present, class only on sample 0
+    tax = {
+        "kingdom": ["animalia", "chromista"],
+        "phylum": ["animalia arthropoda", "chromista heterokontophyta"],
+        "class": ["animalia arthropoda copepoda", None],
+        "order": [None, None], "family": [None, None],
+        "genus": [None, None], "species": [None, None],
+    }
+    g = geometry_stats(model, tax)
+    assert "geom/curv" in g and g["geom/curv"] > 0
+    # ranks with valid entries report radius + aperture; empty ranks do not
+    assert "geom/kingdom/radius" in g and "geom/kingdom/aperture" in g
+    assert "geom/order/radius" not in g  # all-None rank skipped
+    # aperture is a half-angle in (0, pi/2]; radius >= 0
+    for k, v in g.items():
+        if k.endswith("/aperture"):
+            assert 0.0 < v <= 3.1416 / 2 + 1e-4, (k, v)
+        if k.endswith("/radius"):
+            assert v >= 0.0
+        if k.endswith("/entail_ok"):
+            assert 0.0 <= v <= 1.0
+    # at least one parent->child entailment fraction is reported
+    assert any(k.endswith("/entail_ok") for k in g)
+
+
+def test_geometry_stats_radial_ordering_synthetic():
+    """On hand-placed embeddings (root near origin, leaf far out), distance_from_origin
+    must reflect the radial ordering the thesis predicts."""
+    from hyperbolic_plankton import lorentz as L
+
+    curv = torch.tensor(1.0)
+    near = L.exp_map0(torch.tensor([[0.3, 0.0]]), curv)   # small radius
+    far = L.exp_map0(torch.tensor([[4.0, 0.0]]), curv)    # large radius
+    assert L.distance_from_origin(near, curv).item() < L.distance_from_origin(far, curv).item()

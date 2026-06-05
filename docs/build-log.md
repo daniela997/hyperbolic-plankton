@@ -37,6 +37,36 @@ is ablatable. **Planned sweep: λ_sel ∈ {1.0, 0.5, 0.2}**, BioCLIP init, HAC r
 If λ=1.0 over-constrains (curvature collapse, contrastive alignment stalling), it may be
 too aggressive — the live curves will show this early; kill/adjust if so.
 
+### Run 1 result: λ_sel=1.0 → CURVATURE COLLAPSE (killed at it 7250, 2026-06-05)
+
+The caveat materialised. Trajectory (BioCLIP, λ=1.0, HAC recipe):
+
+| it | lr | curv | cl | seen_sp F1 | unseen_sp F1 |
+|---|---|---|---|---|---|
+| 1000 | 8e-5 | 0.96 | 1.92 | 0.219 | 0.016 |
+| 2000 | 1.4e-4 | 0.83 | 1.84 | **0.297** | **0.020** |
+| 3000 | 2.4e-4 | 0.66 | 1.93 | 0.293 | 0.022 |
+| 5000 | 2.5e-4 | 0.50 | 2.12 | 0.214 | 0.017 |
+| 7000 | 2.4e-4 | 0.34 | 2.65 | 0.104 | 0.010 |
+
+**Everything peaks at it~2000 (when warmup finishes ramping LR toward 2.5e-4), then
+degrades as `curv` falls monotonically 0.96→0.33.** `cl` rises as curv shrinks; both F1
+halve from peak. Checkpoints saved at it2000 (peak region), it4000, it6000.
+
+**Mechanism (a real finding, not a bug):** SEL has a built-in incentive to *shrink
+curvature*. Cone half-aperture `asin(2·r_min/(‖x‖·√curv))` widens as curv→0, so smaller
+curvature makes the entailment hinges trivially satisfiable — a cheap way to cut SEL loss
+without organising the hierarchy. At λ=1.0 + full LR this incentive wins; curvature
+collapses and the contrastive geometry degrades as collateral. HAC avoids this despite an
+identical `[curv/10, curv*10]` clamp because its single text⊐image hinge lacks our stacked
+SEL pressure.
+
+**Action:** killed; relaunch at **λ_sel=0.2** (sweep's other end — now a directed test of
+the curvature-collapse hypothesis, not just an ablation). Change ONE variable: if 0.2 is
+stable, confirmed it's the SEL weight; if it still collapses, add a reduced LR for the
+geometric scalars (curv/alpha) — a MERU-style guard. Geometry logging added (see below) to
+watch radius/aperture/entailment per rank directly, not just the scalar curv.
+
 ---
 
 ## Piece 1 — `lorentz.py` (geometry primitives)  ✅ VERIFIED

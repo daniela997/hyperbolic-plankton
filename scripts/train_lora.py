@@ -33,6 +33,7 @@ from hyperbolic_plankton.data import RANKS, HFTaxonomyDataset
 from hyperbolic_plankton.eval import (
     class_set_from_dataset,
     flatten_metrics,
+    geometry_stats,
     run_unseen_eval,
 )
 from hyperbolic_plankton.loss import (
@@ -72,18 +73,32 @@ def _build_eval_sets(cache, args):
     with open(f"{SPLIT_DIR}/unseen_classes.json") as f:
         unseen_classes = json.load(f)
 
-    return {"seen": (seen_ds, seen_classes), "unseen": (unseen_ds, unseen_classes)}
+    # a fixed taxonomy batch (from seen-val) for per-rank geometry diagnostics — built once
+    # so the radius/aperture/entailment curves track the SAME samples over training.
+    geom_items = [seen_ds[i] for i in range(min(512, len(seen_ds)))]
+
+    return {
+        "sets": {"seen": (seen_ds, seen_classes), "unseen": (unseen_ds, unseen_classes)},
+        "geom_items": geom_items,
+    }
 
 
 def _run_periodic_eval(model, eval_sets, num_workers):
-    """Eval seen-val + unseen subsamples; return a flat wandb-loggable dict of per-rank F1."""
+    """Eval seen-val + unseen subsamples + per-rank geometry; flat wandb-loggable dict."""
+    from hyperbolic_plankton.train import TaxonomyCollator
+
     was_training = model.training
     model.eval()
     out = {}
-    for name, (ds, classes) in eval_sets.items():
+    for name, (ds, classes) in eval_sets["sets"].items():
         res = run_unseen_eval(model, ds, classes, num_workers=num_workers)
         out.update(flatten_metrics(res["metrics"], prefix=f"eval/{name}"))
         out[f"eval/{name}/n_classes"] = res["n_classes"]
+
+    # geometry diagnostics on the fixed taxonomy batch
+    _, taxonomy_batch, _ = TaxonomyCollator(model.preprocess)(eval_sets["geom_items"])
+    out.update(geometry_stats(model, taxonomy_batch))
+
     if was_training:
         model.train()
     return out

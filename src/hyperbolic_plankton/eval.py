@@ -234,6 +234,56 @@ def class_set_from_dataset(ds) -> list[str]:
     return sorted({f for f in _full_strings(ds) if f != "unknown"})
 
 
+@torch.no_grad()
+def geometry_stats(model, taxonomy_batch, ranks=RANKS) -> dict:
+    """Per-rank geometric diagnostics for understanding training dynamics.
+
+    Encodes the batch's per-rank taxonomy text into the hyperboloid and reports, for each
+    rank with valid entries:
+      - `radius`: mean geodesic distance-from-origin ‖x‖_hyp. Thesis prediction is a
+        MONOTONIC ordering kingdom(small) → species(large); inversion/flattening = trouble.
+      - `aperture`: mean cone half-aperture. Coarser ranks should have WIDER cones. This is
+        also the quantity SEL shrinks via curvature, so a uniform widening across ranks is
+        the signature of curvature-collapse "cheating".
+      - `entail_ok`: for each consecutive (parent, child) rank edge present in the batch,
+        the fraction of valid pairs where the child lies INSIDE the parent's cone
+        (oxy_angle ≤ half_aperture) — the direct measure of entailment being learned,
+        independent of the loss value.
+    Returns a flat dict keyed `geom/{rank}/radius`, `geom/{rank}/aperture`,
+    `geom/{parent}->{child}/entail_ok`, plus `geom/curv`.
+    """
+    was_training = model.training
+    model.eval()
+    embs = model.encode_taxonomy(taxonomy_batch)  # {rank: [B,D], rank_valid: [B]}
+    curv = model.curvature
+    out: dict = {"geom/curv": float(curv)}
+
+    for r in ranks:
+        if r not in embs:
+            continue
+        valid = embs[f"{r}_valid"]
+        if not bool(valid.any()):
+            continue
+        x = embs[r][valid]
+        out[f"geom/{r}/radius"] = float(L.distance_from_origin(x, curv).mean())
+        out[f"geom/{r}/aperture"] = float(L.half_aperture(x, curv).mean())
+
+    present = [r for r in ranks if r in embs]
+    for parent, child in zip(present[:-1], present[1:]):
+        pv, cv = embs[f"{parent}_valid"], embs[f"{child}_valid"]
+        both = pv & cv
+        if not bool(both.any()):
+            continue
+        p, c = embs[parent][both], embs[child][both]
+        angle = L.oxy_angle(p, c, curv)
+        aperture = L.half_aperture(p, curv)
+        out[f"geom/{parent}->{child}/entail_ok"] = float((angle <= aperture).float().mean())
+
+    if was_training:
+        model.train()
+    return out
+
+
 def flatten_metrics(metrics: dict, prefix: str) -> dict:
     """taxonomic_macro_f1 output -> flat `{prefix}/{rank}_f1` dict for wandb logging."""
     out = {}
