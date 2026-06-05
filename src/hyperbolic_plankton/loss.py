@@ -149,9 +149,9 @@ def _edge_loss(
 
     if stats is not None:
         k = stats_key
-        stats[f"{k}/pos"] = float(pos_loss)
+        stats[f"{k}/pos"] = pos_loss.detach().item()
         stats[f"{k}/n_pos"] = int(pos_mask.sum())
-        stats[f"{k}/neg"] = float(neg_loss) if neg_loss is not None else 0.0
+        stats[f"{k}/neg"] = neg_loss.detach().item() if neg_loss is not None else 0.0
         stats[f"{k}/n_neg"] = int(neg_mask.sum())
 
     return loss

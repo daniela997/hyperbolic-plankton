@@ -127,9 +127,13 @@ def log(msg):
         print(msg, flush=True)
 
 
-def forward_loss(model, pixel_values, taxonomy_batch, lambda_sel):
+def forward_loss(model, pixel_values, taxonomy_batch, lambda_sel, stats=None):
     """contrastive(img, deepest_text) + lambda*SEL. `model` may be a DDP wrapper; geometry
-    helpers live on the underlying module."""
+    helpers live on the underlying module.
+
+    If `stats` (a dict) is given, the SEL per-edge pos/neg decomposition is collected into
+    it (cheap float reads) for per-step logging alongside cl/sel.
+    """
     core = model.module if isinstance(model, DDP) else model
     img = core.encode_image(pixel_values)
     text_embs = core.encode_taxonomy(taxonomy_batch)
@@ -137,7 +141,12 @@ def forward_loss(model, pixel_values, taxonomy_batch, lambda_sel):
     scale = core.logit_scale.exp()
     deepest, _ = _deepest_text(text_embs, RANKS)
     cl = hyperbolic_contrastive_loss(img, deepest, curv, scale)
-    sel, intra, inter = stacked_entailment_loss(img, text_embs, taxonomy_batch, RANKS, curv)
+    sel, intra, inter = stacked_entailment_loss(
+        img, text_embs, taxonomy_batch, RANKS, curv, stats=stats
+    )
+    if stats is not None:
+        stats["loss_terms/sel_intra"] = intra.detach().item()
+        stats["loss_terms/sel_inter"] = inter.detach().item()
     return cl + lambda_sel * sel, cl.detach(), sel.detach()
 
 
@@ -228,8 +237,11 @@ def main():
     run_cl = run_sel = run_loss = 0.0
     data_iter = iter(loader)
     epoch = 0
+    sel_terms: dict = {}  # last-micro-step SEL decomposition, refreshed before each log
     while it < args.iters:
         opt.zero_grad(set_to_none=True)
+        # collect the SEL term breakdown on the last micro-step of an iter that will log.
+        is_log_iter = (it + 1) % args.log_every == 0
         # gradient accumulation: `accum` micro-batches per optimizer step
         for micro in range(args.accum):
             try:
@@ -247,8 +259,12 @@ def main():
                 if ddp and micro < args.accum - 1
                 else _nullctx()
             )
+            last_micro = micro == args.accum - 1
+            step_stats = sel_terms if (is_log_iter and last_micro and is_main()) else None
             with sync_ctx, torch.amp.autocast("cuda"):
-                loss, cl, sel = forward_loss(ddp_model, pixel_values, taxonomy_batch, args.lambda_sel)
+                loss, cl, sel = forward_loss(
+                    ddp_model, pixel_values, taxonomy_batch, args.lambda_sel, stats=step_stats
+                )
                 loss = loss / args.accum
             scaler.scale(loss).backward()
             run_loss += loss.item() * args.accum
@@ -270,13 +286,17 @@ def main():
                 f"sel {avg_sel:.4f} | lr {lr:.2e} | curv {model.curvature.item():.3f} | "
                 f"{ips:.0f} img/s")
             if wb is not None:
-                wb.log({
+                payload = {
                     "train/loss": avg_loss, "train/cl": avg_cl, "train/sel": avg_sel,
                     "train/lr": lr, "train/curv": model.curvature.item(),
                     "train/logit_scale": model.logit_scale.exp().item(),
                     "train/lambda_sel": args.lambda_sel, "train/img_per_s": ips,
                     "train/epoch": epoch,
-                }, step=it)
+                }
+                # SEL term breakdown from this iter's last micro-step (train/loss_terms/*)
+                payload.update({f"train/{k}": v for k, v in sel_terms.items()})
+                wb.log(payload, step=it)
+            sel_terms.clear()
             run_cl = run_sel = run_loss = 0.0
             t0 = time.perf_counter()
 
