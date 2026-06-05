@@ -13,6 +13,32 @@ LoRA**. Projector-only must work end-to-end before the LoRA tier.
 
 ---
 
+## Training plan — λ_sel sweep (recorded before first launch, 2026-06-05)
+
+Loss = `contrastive(img, deepest_text) + λ_sel · SEL`. `λ_sel` is logged to wandb so it
+is ablatable. **Planned sweep: λ_sel ∈ {1.0, 0.5, 0.2}**, BioCLIP init, HAC recipe
+(30k iters, batch 768, lr 2.5e-4, 4k warmup + cos², LoRA r=128 rslora).
+
+**Headline run first at λ_sel = 1.0**, then 0.5 and 0.2 as the ablation arm. Rationale:
+- The thesis rests on **SEL** (entailment cones → higher-rank fallback on unseen species);
+  the contrastive term alone is "hyperbolic CLIP", not "hyperbolic *taxonomy* CLIP". Start
+  where SEL has real influence.
+- Our SEL magnitude is already small in practice (smoke: `sel`≈0.05–0.15 vs `cl`≈2–4), so
+  even at λ=1.0 SEL is a minority of the total loss; λ=0.2 → 0.01–0.03 may be too weak to
+  shape the geometry. Starting at 0.2 would tell us less.
+- HAC uses `entail_weight=0.2`, but HAC's entailment is a **different object** (single
+  text⊐image hinge regularizing a contrastive main objective; ours is a *stack* of
+  rank→rank hinges closer to a primary objective). 0.2 isn't directly transferable.
+- λ=0.2 doubles as the "does SEL even matter?" near-pure-contrastive comparison: if 1.0
+  and 0.2 land together, SEL isn't doing much (a finding); if 1.0 wins, it supports the
+  thesis.
+
+**Caveat / what to watch (first ~2k iters):** SEL behaviour past ~200 iters is unverified.
+If λ=1.0 over-constrains (curvature collapse, contrastive alignment stalling), it may be
+too aggressive — the live curves will show this early; kill/adjust if so.
+
+---
+
 ## Piece 1 — `lorentz.py` (geometry primitives)  ✅ VERIFIED
 
 **Files:** `src/hyperbolic_plankton/lorentz.py`, `tests/test_lorentz.py`.
