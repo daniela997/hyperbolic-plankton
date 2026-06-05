@@ -95,9 +95,23 @@ def _run_periodic_eval(model, eval_sets, num_workers):
         out.update(flatten_metrics(res["metrics"], prefix=f"eval/{name}"))
         out[f"eval/{name}/n_classes"] = res["n_classes"]
 
-    # geometry diagnostics on the fixed taxonomy batch
-    _, taxonomy_batch, _ = TaxonomyCollator(model.preprocess)(eval_sets["geom_items"])
+    # geometry diagnostics + SEL term decomposition on the fixed batch
+    pixel_values, taxonomy_batch, _ = TaxonomyCollator(model.preprocess)(eval_sets["geom_items"])
     out.update(geometry_stats(model, taxonomy_batch))
+
+    # per-term SEL (intra per edge + inter, pos/neg components) for understanding which
+    # part of the loss is active — logged under loss_terms/*.
+    with torch.no_grad():
+        img = model.encode_image(pixel_values.to(model.device))
+        text_embs = model.encode_taxonomy(taxonomy_batch)
+        sel_stats: dict = {}
+        _, intra, inter = stacked_entailment_loss(
+            img, text_embs, taxonomy_batch, RANKS, model.curvature, stats=sel_stats
+        )
+        out["loss_terms/sel_intra"] = float(intra)
+        out["loss_terms/sel_inter"] = float(inter)
+        for k, v in sel_stats.items():
+            out[f"loss_terms/{k}"] = v
 
     if was_training:
         model.train()

@@ -92,6 +92,8 @@ def _edge_loss(
     r_min: float,
     margin: float,
     use_negatives: bool,
+    stats: dict | None = None,
+    stats_key: str = "",
 ) -> torch.Tensor:
     """Entailment loss for one (parent_rank -> child_rank) edge over the B×B grid.
 
@@ -134,13 +136,23 @@ def _edge_loss(
 
     pos_all = entailment_pos(p_grid, c_grid, curv, r_min).reshape(B, B)
     if pos_mask.any():
-        loss = pos_all[pos_mask].mean()
+        pos_loss = pos_all[pos_mask].mean()
     else:
-        loss = parent.new_zeros(())
+        pos_loss = parent.new_zeros(())
+    loss = pos_loss
 
+    neg_loss = None
     if use_negatives and neg_mask.any():
         neg_all = entailment_neg(p_grid, c_grid, curv, r_min, margin).reshape(B, B)
-        loss = 0.5 * (loss + neg_all[neg_mask].mean())
+        neg_loss = neg_all[neg_mask].mean()
+        loss = 0.5 * (loss + neg_loss)
+
+    if stats is not None:
+        k = stats_key
+        stats[f"{k}/pos"] = float(pos_loss)
+        stats[f"{k}/n_pos"] = int(pos_mask.sum())
+        stats[f"{k}/neg"] = float(neg_loss) if neg_loss is not None else 0.0
+        stats[f"{k}/n_neg"] = int(neg_mask.sum())
 
     return loss
 
@@ -153,6 +165,7 @@ def sel_intra(
     r_min: float = 0.1,
     margin: float = 0.1,
     use_negatives: bool = True,
+    stats: dict | None = None,
 ) -> torch.Tensor:
     """Stacked entailment between consecutive ranks (paper Eq. 3).
 
@@ -160,6 +173,8 @@ def sel_intra(
     (r-1, r) is "supervised" iff both ranks' embeddings are present; edges with no valid
     in-batch positive pairs contribute 0 to the numerator but still count in the
     denominator (so deeper edges aren't re-weighted when shallow ranks dominate).
+
+    `stats` (if given) collects per-edge pos/neg components for logging.
     """
     edges = [
         (ranks[i - 1], ranks[i])
@@ -182,6 +197,8 @@ def sel_intra(
             r_min=r_min,
             margin=margin,
             use_negatives=use_negatives,
+            stats=stats,
+            stats_key=f"sel_intra/{parent_rank}->{child_rank}",
         )
         total = loss if total is None else total + loss
     return total / len(edges)
@@ -217,6 +234,7 @@ def sel_inter(
     r_min: float = 0.1,
     margin: float = 0.1,
     use_negatives: bool = True,
+    stats: dict | None = None,
 ) -> torch.Tensor:
     """Image entailed by its deepest available text (text is parent, image is child).
 
@@ -239,6 +257,8 @@ def sel_inter(
         r_min=r_min,
         margin=margin,
         use_negatives=use_negatives,
+        stats=stats,
+        stats_key="sel_inter/text->image",
     )
 
 
@@ -251,8 +271,12 @@ def stacked_entailment_loss(
     r_min: float = 0.1,
     margin: float = 0.1,
     use_negatives: bool = True,
+    stats: dict | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Full SEL = SEL-intra + SEL-inter. Returns (total, intra, inter)."""
-    intra = sel_intra(text_embs, taxonomy_batch, ranks, curv, r_min, margin, use_negatives)
-    inter = sel_inter(img, text_embs, taxonomy_batch, ranks, curv, r_min, margin, use_negatives)
+    """Full SEL = SEL-intra + SEL-inter. Returns (total, intra, inter).
+
+    `stats` (if given) collects per-edge / per-term pos+neg components for logging.
+    """
+    intra = sel_intra(text_embs, taxonomy_batch, ranks, curv, r_min, margin, use_negatives, stats=stats)
+    inter = sel_inter(img, text_embs, taxonomy_batch, ranks, curv, r_min, margin, use_negatives, stats=stats)
     return intra + inter, intra, inter

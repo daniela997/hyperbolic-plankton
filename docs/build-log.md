@@ -67,6 +67,38 @@ stable, confirmed it's the SEL weight; if it still collapses, add a reduced LR f
 geometric scalars (curv/alpha) — a MERU-style guard. Geometry logging added (see below) to
 watch radius/aperture/entailment per rank directly, not just the scalar curv.
 
+### SEL correctness audit (before relaunch) — ✅ SEL IS CORRECT
+
+Reviewed what each SEL term operates on + measured the geometry on a real BioCLIP batch
+(no training). Verdict: **the loss is implemented correctly; run-1's failure was
+optimization (curvature collapse), not a loss bug.** Evidence:
+
+- **What each term operates on:** `sel_intra` = entailment between *consecutive-rank
+  cumulative-lineage texts* (parent=coarser, child=finer); positive if same lineage at
+  the parent rank, pushing finer text inside coarser text's cone. `sel_inter` =
+  deepest-valid-text ⊐ image. Class label = cumulative `full` string (matches contrastive
+  + eval + the paper's `tax_label`).
+- **`oxy_angle` verified** on controlled cases: child deeper along parent's ray →
+  angle 0 (inside); child *shallower* → angle π (outside). So entailment needs child
+  (a) along parent's ray AND (b) at LARGER radius.
+- **Cumulative encoding is NOT degenerate** (Concern A refuted): parent/child cosines
+  0.59–0.94, distances 0.09–0.24 — distinct points, real gradient.
+- **Root cause of `entail_ok=0`:** at init the per-rank **radii are flat (~0.26–0.30)**
+  with no increasing trend (kingdom even slightly larger). Children aren't further out
+  than parents, so they're outside the cones. SEL's *job* is to create that radial
+  ordering; entail_ok=0 pre-training is correct/expected.
+- **Per-term decomposition (logged as `loss_terms/*`):** at init **`neg=0` at every edge**
+  (non-children already far outside cones, nothing to push), **`pos≈0.9–1.3`** (real
+  positive pressure, larger at deeper edges). `n_pos` shrinks with depth (kingdom→phylum
+  134K → genus→species 721) since fine ranks have mostly-distinct labels → noisy deep
+  edges. So SEL = essentially all positive pressure at init, competing with the (easier)
+  curvature-shrink escape.
+
+**Instrumentation added:** `loss.stacked_entailment_loss(..., stats=dict)` decomposes
+intra-per-edge + inter into pos/neg + pair counts; driver logs `loss_terms/*`. Combined
+with `geom/*`, the λ=0.2 run can distinguish *healthy* (sel pos ↓ **while** entail_ok ↑,
+radii spread) from *cheating* (pos ↓ but entail_ok stays 0, apertures widen uniformly).
+
 ---
 
 ## Piece 1 — `lorentz.py` (geometry primitives)  ✅ VERIFIED

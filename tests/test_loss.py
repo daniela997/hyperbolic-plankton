@@ -167,6 +167,30 @@ def test_stacked_returns_parts():
     assert torch.allclose(total, intra + inter)
 
 
+def test_stats_decomposition_keys_and_consistency():
+    """The optional `stats` dict collects per-edge intra + inter pos/neg components and
+    pair counts; the recorded pos value matches a direct positive-only edge loss."""
+    ranks = ["order", "family"]
+    embs = _make_text_embs(
+        {"order": [[3, 0, 0], [0, 3, 0]], "family": [[0, 2, 0], [2, 0, 0]]}, ranks
+    )
+    tax = {"order": ["A", "A"], "family": ["A1", "A2"]}  # same parent -> all pairs positive
+    img = _on_manifold(torch.randn(2, 3))
+    stats: dict = {}
+    Lo.stacked_entailment_loss(img, embs, tax, ranks, CURV, stats=stats)
+
+    # intra edge + inter term both recorded, with pos/neg/n_pos/n_neg
+    assert "sel_intra/order->family/pos" in stats
+    assert "sel_intra/order->family/n_pos" in stats
+    assert "sel_inter/text->image/pos" in stats
+    # recorded intra pos == positive-only edge loss (use_negatives=False isolates pos)
+    pos_only = Lo.sel_intra(embs, tax, ranks, CURV, use_negatives=False)
+    assert abs(stats["sel_intra/order->family/pos"] - float(pos_only)) < 1e-6
+    # all 4 pairs share the parent label -> 4 positives, 0 negatives
+    assert stats["sel_intra/order->family/n_pos"] == 4
+    assert stats["sel_intra/order->family/n_neg"] == 0
+
+
 # --------------------------------------------------------------------------------
 # EXACT-VALUE composition tests.
 # These treat oxy_angle / half_aperture as a trusted oracle (MERU prior art) and verify
