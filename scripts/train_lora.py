@@ -19,6 +19,9 @@ os.environ.setdefault("NCCL_P2P_DISABLE", "1")
 import argparse
 import time
 
+import json
+
+import numpy as np
 import torch
 import torch.distributed as dist
 from datasets import load_from_disk
@@ -26,7 +29,12 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader
 from torch.utils.data.distributed import DistributedSampler
 
-from hyperbolic_plankton.data import RANKS, HFTaxonomyDataset, split_seen_unseen
+from hyperbolic_plankton.data import RANKS, HFTaxonomyDataset
+from hyperbolic_plankton.eval import (
+    class_set_from_dataset,
+    flatten_metrics,
+    run_unseen_eval,
+)
 from hyperbolic_plankton.loss import (
     _deepest_text,
     hyperbolic_contrastive_loss,
@@ -39,6 +47,46 @@ from hyperbolic_plankton.train import TaxonomyCollator
 
 CACHE = "/scratch/daniela/planktonzilla_cache/plankton"
 CKPT_DIR = "/scratch/daniela/hyperbolic_plankton_ckpts"
+SPLIT_DIR = "/scratch/daniela/hyperbolic_plankton_splits"
+WANDB_DIR = "/scratch/daniela/wandb"  # keep wandb's local files off the repo/home
+
+
+def _build_eval_sets(cache, args):
+    """Fixed, seeded subsamples of seen-val and unseen for periodic eval (rank 0 only).
+
+    Returns {seen: (ds, classes), unseen: (ds, classes)}. seen-val predicts among the
+    classes present in the seen-val subsample; unseen uses the prebuilt 220-class set.
+    """
+    rng = np.random.default_rng(0)
+
+    val_idx = np.load(f"{SPLIT_DIR}/val_idx.npy")
+    sel = rng.choice(val_idx, size=min(args.eval_n, len(val_idx)), replace=False)
+    seen_val = cache.select(sorted(sel.tolist()))
+    seen_classes = class_set_from_dataset(seen_val)
+    seen_ds = HFTaxonomyDataset(seen_val)
+
+    unseen_idx = np.load(f"{SPLIT_DIR}/unseen_idx.npy")
+    sel = rng.choice(unseen_idx, size=min(args.eval_n, len(unseen_idx)), replace=False)
+    unseen_sub = cache.select(sorted(sel.tolist()))
+    unseen_ds = HFTaxonomyDataset(unseen_sub)
+    with open(f"{SPLIT_DIR}/unseen_classes.json") as f:
+        unseen_classes = json.load(f)
+
+    return {"seen": (seen_ds, seen_classes), "unseen": (unseen_ds, unseen_classes)}
+
+
+def _run_periodic_eval(model, eval_sets, num_workers):
+    """Eval seen-val + unseen subsamples; return a flat wandb-loggable dict of per-rank F1."""
+    was_training = model.training
+    model.eval()
+    out = {}
+    for name, (ds, classes) in eval_sets.items():
+        res = run_unseen_eval(model, ds, classes, num_workers=num_workers)
+        out.update(flatten_metrics(res["metrics"], prefix=f"eval/{name}"))
+        out[f"eval/{name}/n_classes"] = res["n_classes"]
+    if was_training:
+        model.train()
+    return out
 
 
 def is_main():
@@ -78,7 +126,11 @@ def main():
     ap.add_argument("--num-workers", type=int, default=6)
     ap.add_argument("--ckpt-every", type=int, default=2000)
     ap.add_argument("--log-every", type=int, default=50)
+    ap.add_argument("--eval-every", type=int, default=1000)
+    ap.add_argument("--eval-n", type=int, default=10000, help="subsample size per eval set")
     ap.add_argument("--tag", default="bioclip_lora")
+    ap.add_argument("--wandb-project", default="hyperbolic-plankton")
+    ap.add_argument("--no-wandb", action="store_true")
     args = ap.parse_args()
 
     ddp = "RANK" in os.environ
@@ -104,11 +156,18 @@ def main():
             f"({100 * c['trainable'] / c['total']:.2f}%)")
     ddp_model = DDP(model, device_ids=[device.index], find_unused_parameters=True) if ddp else model
 
-    # data: seen pool only
-    log("loading cache + splitting seen/unseen...")
-    seen_ds, _ = split_seen_unseen(load_from_disk(CACHE))
-    train_ds = HFTaxonomyDataset(seen_ds)
-    log(f"seen training rows: {len(train_ds):,}")
+    # data: load the prebuilt Planktonzilla-faithful splits (scripts/build_splits.py).
+    # Train on seen-TRAIN only; seen-val + unseen are held out for periodic eval.
+    log("loading cache + prebuilt split indices...")
+    cache = load_from_disk(CACHE)
+    train_idx = np.load(f"{SPLIT_DIR}/train_idx.npy")
+    train_ds = HFTaxonomyDataset(cache.select(train_idx.tolist()))
+    log(f"seen-train rows: {len(train_ds):,}")
+
+    # eval subsamples (fixed, seeded) built once on rank 0's view; every rank can build
+    # them but only rank 0 evaluates.
+    eval_sets = _build_eval_sets(cache, args) if is_main() else None
+
     collate = TaxonomyCollator(model.preprocess)
     sampler = DistributedSampler(train_ds, shuffle=True, seed=0) if ddp else None
     loader = DataLoader(
@@ -120,6 +179,18 @@ def main():
     opt = torch.optim.AdamW(param_groups(model, args.wd), lr=args.lr, betas=(0.9, 0.98))
     sched = LinearWarmupCosineDecayLR(opt, total_steps=args.iters, warmup_steps=args.warmup)
     scaler = torch.amp.GradScaler("cuda")
+
+    # wandb (rank 0 only): config = all hyperparams incl lambda_sel + effective batch.
+    wb = None
+    if is_main() and not args.no_wandb:
+        import wandb
+
+        os.makedirs(WANDB_DIR, exist_ok=True)
+        wb = wandb.init(
+            project=args.wandb_project, name=args.tag, dir=WANDB_DIR,
+            config={**vars(args), "effective_batch": eff_batch, "world_size": world,
+                    "trainable_params": count_trainable(model)["trainable"]},
+        )
 
     os.makedirs(CKPT_DIR, exist_ok=True)
     ddp_model.train()
@@ -164,12 +235,34 @@ def main():
         if it % args.log_every == 0:
             n = args.log_every * args.accum
             ips = args.log_every * eff_batch / (time.perf_counter() - t0)
-            log(f"it {it:>6}/{args.iters} | loss {run_loss / args.log_every:.4f} "
-                f"cl {run_cl / n:.4f} sel {run_sel / n:.4f} | "
-                f"lr {sched.get_last_lr()[0]:.2e} | curv {model.curvature.item():.3f} | "
+            avg_loss, avg_cl, avg_sel = run_loss / args.log_every, run_cl / n, run_sel / n
+            lr = sched.get_last_lr()[0]
+            log(f"it {it:>6}/{args.iters} | loss {avg_loss:.4f} cl {avg_cl:.4f} "
+                f"sel {avg_sel:.4f} | lr {lr:.2e} | curv {model.curvature.item():.3f} | "
                 f"{ips:.0f} img/s")
+            if wb is not None:
+                wb.log({
+                    "train/loss": avg_loss, "train/cl": avg_cl, "train/sel": avg_sel,
+                    "train/lr": lr, "train/curv": model.curvature.item(),
+                    "train/logit_scale": model.logit_scale.exp().item(),
+                    "train/lambda_sel": args.lambda_sel, "train/img_per_s": ips,
+                    "train/epoch": epoch,
+                }, step=it)
             run_cl = run_sel = run_loss = 0.0
             t0 = time.perf_counter()
+
+        # periodic eval (rank 0). Other ranks wait at a barrier so DDP stays in lockstep.
+        if it % args.eval_every == 0:
+            if is_main():
+                metrics = _run_periodic_eval(model, eval_sets, args.num_workers)
+                log(f"  [eval it {it}] "
+                    f"unseen species_f1={metrics.get('eval/unseen/species_f1', 0):.4f} "
+                    f"seen species_f1={metrics.get('eval/seen/species_f1', 0):.4f}")
+                if wb is not None:
+                    wb.log(metrics, step=it)
+            if ddp:
+                dist.barrier()
+            t0 = time.perf_counter()  # don't count eval time in img/s
 
         if is_main() and it % args.ckpt_every == 0:
             path = os.path.join(CKPT_DIR, f"{args.tag}_it{it}.pt")
@@ -180,6 +273,8 @@ def main():
         path = os.path.join(CKPT_DIR, f"{args.tag}_final.pt")
         torch.save({"model": model.state_dict(), "it": it, "args": vars(args)}, path)
         log(f"DONE. saved {path}")
+        if wb is not None:
+            wb.finish()
     if ddp:
         dist.destroy_process_group()
 

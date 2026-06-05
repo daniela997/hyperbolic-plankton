@@ -228,6 +228,20 @@ def run_unseen_eval(
     }
 
 
+def class_set_from_dataset(ds) -> list[str]:
+    """Sorted unique `full` strings present in a dataset (drops 'unknown') — the class
+    label space for a seen-val eval (model predicts among classes seen in this split)."""
+    return sorted({f for f in _full_strings(ds) if f != "unknown"})
+
+
+def flatten_metrics(metrics: dict, prefix: str) -> dict:
+    """taxonomic_macro_f1 output -> flat `{prefix}/{rank}_f1` dict for wandb logging."""
+    out = {}
+    for rank, m in metrics.items():
+        out[f"{prefix}/{rank}_f1"] = m["f1"]
+    return out
+
+
 @torch.no_grad()
 def predict_per_rank(
     img_embs: torch.Tensor,
