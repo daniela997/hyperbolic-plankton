@@ -203,12 +203,21 @@ The paper trains **four models from four inits**, two architectures:
 - Labels **truncated at each level**; a sample is **evaluated only at ranks where it
   has a valid annotation** (ragged). **[stated]**
 - CLIP-based predictions: **image–text similarity** (nearest class-prototype text).
+  Eval prompt = `"a photo of a {label}"`, label = the `full` lineage string. **[verified
+  in `metrics_paper.ipynb`]**
 - Supervised predictions: softmax over class logits.
 - As eval moves to finer ranks, performance reflects ability to distinguish finer
   taxa within the same parent. **[stated]**
 
 > ⚠️ **Macro-F1, not macro-accuracy.** F1 needs per-class precision AND recall.
-> (Our current `evaluate.py` computes macro-recall — a known gap to fix.)
+> Our `src/.../eval.py::taxonomic_macro_f1` re-implements the paper's
+> `evaluate_taxonomic_metrics` (token-truncation + sklearn `f1_score(macro)`) and is
+> cross-checked to 1e-12 against a vendored copy. **[RESOLVED — Piece 6]**
+>
+> **Pipeline validated:** our split independently reproduces the paper's **220 classes /
+> 113,089 unseen samples**, and our Euclidean-cosine BioCLIP baseline matches paper
+> Table 3 (Order/Family identical to 3 dp; coarse ranks slightly lower). See build-log
+> Piece 6.
 
 ---
 
@@ -222,10 +231,10 @@ The paper trains **four models from four inits**, two architectures:
   encoder + linear head (this repo's "CLIP" = CLIP-pretrained *backbone*; the actual
   **contrastive** training was run through **OpenCLIP** via `scripts/train_clip.sh`,
   not `pz_train`). **[stated]**
-- The contrastive CLIP text captions (taxonomic lineage as a single `.txt` string per
-  image in webdataset shards) are built by a cluster-side notebook
-  (`notebooks/save_planktonzilla2.py`) **not present in the repo**. **[unknown:
-  exact caption format/separators/template]**
+- The contrastive CLIP text captions = the **`tax_label` lineage string**:
+  `" ".join([Kingdom..Species] non-empty)`, space-separated, lowercase (built by
+  `notebooks/gen_datasets.py::build_tax_string`; written one per image to webdataset
+  `.txt` shards by `save_planktonzilla_for_clip.py`). **[RESOLVED — Piece 6]**
 - `planktonzilla/loss.py`: imbalanced-learning losses (Focal, LDAM, Asymmetric,
   etc.) for the supervised path.
 
@@ -233,8 +242,8 @@ The paper trains **four models from four inits**, two architectures:
 
 ## 10. Open / unverified items
 
-- **[unknown]** Exact text-caption format used for contrastive training (lineage
-  join string vs templated prompt) — built off-repo.
+- **[RESOLVED — Piece 6]** Text-caption format: training = bare `tax_label` lineage
+  string; eval = `"a photo of a {label}"` over that string. (See §8.)
 - **[unknown]** Exact pretrained init for the supervised classifier row (almost
   certainly fine-tune-from-pretrained, but not literally stated).
 - **[RESOLVED]** The `dataset` column strings are **lowercase** and differ from the

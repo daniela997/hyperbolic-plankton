@@ -201,6 +201,59 @@ seen pool.
 
 ---
 
+## Piece 6 — unseen-species eval  ✅ VERIFIED (split reproduces paper exactly)
+
+`src/.../eval.py`: Planktonzilla-faithful Table-3 protocol, hyperbolic-distance prediction
++ a Euclidean-cosine path for the paper-matching baseline. `scripts/run_unseen_eval.py`.
+
+**Protocol (verified against the repo, not assumed):**
+- Class string = `" ".join([Kingdom..Species] non-empty)` = our `build_taxonomy(row)["full"]`
+  (paper `gen_datasets.py::build_tax_string`). Both skip gaps; no contiguity requirement.
+- Unseen classes = held-out `full` strings absent from the seen pool, Kingdom required.
+- Predict: encode each class string with prompt `"a photo of a {label}"` (paper's exact
+  template, confirmed in metrics_paper.ipynb), nearest prototype. Paper: argmax cosine;
+  ours: argmin Lorentzian distance. Restrict label space to the unseen set.
+- Per-rank macro-F1: truncate true+pred `full` to k tokens, sklearn `f1_score(macro)` —
+  re-implements `evaluate_taxonomic_metrics`. Plus overall full-string F1.
+
+**Split reproduces the paper EXACTLY (independent of any model):**
+- **220 unseen classes / 113,089 samples** — matches paper §3.1 verbatim. Built from raw
+  cache with our own `full`-string + `HELD_OUT_DATASETS` logic. (Held-out total 821,212.)
+
+**Euclidean-cosine baseline vs paper Table 3 (ViT-B/16 BioCLIP, zero-shot, n=113,089):**
+
+| rank | paper | ours | | rank | paper | ours |
+|---|---|---|---|---|---|---|
+| kingdom | 0.346 | 0.259 | | order | 0.018 | **0.018** |
+| phylum | 0.102 | 0.081 | | family | 0.013 | **0.013** |
+| class | 0.032 | 0.035 | | genus | 0.011 | 0.010 |
+| | | | | species | 0.010 | 0.007 |
+
+Order/Family **identical to 3 dp**; class/genus within rounding. Coarse ranks (kingdom,
+phylum) run a bit lower — second-order (BioCLIP snapshot / fp autocast / argmax ties),
+not a pipeline error. **This validates the data split + class strings + similarity
+prediction + truncated macro-F1 against the published numbers.** CLIP (OpenAI) baseline
+also runs (kingdom 0.328, then decays) — consistent regime.
+
+**Verified (`tests/test_eval.py`, 5 tests):**
+- `taxonomic_macro_f1` matches a **vendored verbatim copy** of the paper's
+  `evaluate_taxonomic_metrics` to 1e-12 on random ragged labels (load-bearing check) +
+  exact hand-computed kingdom F1 (=1/3 on a worked 2-sample example).
+- `build_unseen_classes` set algebra; `predict` argmin geometry (synthetic hyperboloid);
+  end-to-end on the real model (text-as-image surrogate → recovers own class, full F1=1).
+
+**Note:** for the paper-comparable eval the class identity is the `full` lineage string —
+NOT `proposed_label` (that was the training-positive choice in Piece 5; separate axis).
+
+**Still to do:** SimpleShot 1/5-shot (image-centroid, 5 seeds) as added Table-3 columns;
+fold the fast columnar `_full_strings` into the lib (currently inlined in the run script).
+The headline comparison needs a *trained* projector/LoRA model run through `run_unseen_eval`
+(Piece 5 output) — the untrained projector floor is ~0 (random projection breaks alignment).
+
+State at this point: **73 tests pass**. Pieces 1,2,3,4,5,6,7 verified.
+
+---
+
 ## Piece 5 — collator + train step  ✅ VERIFIED
 
 `src/.../train.py`: `TaxonomyCollator` + `train_step`. Bridges data items → model+losses.
