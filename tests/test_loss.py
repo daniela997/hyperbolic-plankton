@@ -328,3 +328,41 @@ def test_crosscheck_entailment_neg_vs_scratch():
     ours = Lo.entailment_neg(parent, child, CURV, r_min=0.1, margin=0.1)
     ref = SCRATCH.entailment_loss_negative(parent, child, curv=CURV, r_min=0.1, margin=0.1)
     assert torch.allclose(ours, ref, atol=_EPS_GAP_ATOL), (ours - ref).abs().max()
+
+
+# --------------------------------------------------------------------------------
+# Ragged-taxonomy NaN regression
+# --------------------------------------------------------------------------------
+
+def test_sel_backward_finite_with_ragged_missing_ranks():
+    """Invalid (None) ranks arrive as ZERO embeddings; fed to the cone geometry they make
+    half_aperture's asin argument blow up and its BACKWARD return NaN. _edge_loss must
+    sanitize them so gradients stay finite. Regression for the training-blocker bug.
+
+    Build a batch where deep ranks are mostly missing (the real ragged case), make the
+    embeddings require grad, backprop the full SEL, and assert no NaN/Inf grad anywhere.
+    """
+    ranks = ["kingdom", "phylum", "class"]
+    embs = _make_text_embs(
+        {
+            "kingdom": [[3, 0, 0], [0, 3, 0], [0, 0, 3]],
+            "phylum": [[2, 1, 0], None, [0, 1, 2]],   # sample 1 missing phylum
+            "class": [None, None, [1, 1, 1]],          # only sample 2 has class
+        },
+        ranks,
+    )
+    for r in ranks:
+        embs[r] = embs[r].clone().requires_grad_(True)
+    tax = {
+        "kingdom": ["A", "B", "C"],
+        "phylum": ["A1", None, "C1"],
+        "class": [None, None, "C1a"],
+    }
+    img = _on_manifold(torch.randn(3, 3)).requires_grad_(True)
+
+    total, intra, inter = Lo.stacked_entailment_loss(img, embs, tax, ranks, CURV)
+    assert torch.isfinite(total)
+    total.backward()
+    for r in ranks:
+        assert torch.isfinite(embs[r].grad).all(), f"NaN/Inf grad in {r}"
+    assert torch.isfinite(img.grad).all()

@@ -103,6 +103,20 @@ def _edge_loss(
     B = parent.shape[0]
     device = parent.device
 
+    # Invalid (ragged-missing) entries arrive as ZERO vectors from encode_taxonomy. Fed
+    # into the cone geometry they make ||x||->0, so half_aperture's asin argument -> inf
+    # and its backward returns NaN (acos in oxy_angle likewise). These entries are masked
+    # out of the loss below, so replacing them with a safe unit-norm placeholder leaves
+    # every loss value unchanged while keeping zero vectors out of the geometry. We detect
+    # invalid by mask (not by norm) so valid small-norm embeddings are untouched.
+    def _sanitize(emb, valid_mask):
+        unit = torch.zeros_like(emb)
+        unit[..., 0] = 1.0
+        return torch.where(valid_mask.unsqueeze(-1), emb, unit)
+
+    parent = _sanitize(parent, parent_valid)
+    child = _sanitize(child, child_valid)
+
     # valid pairs: parent valid in its row, child valid in its column
     valid = parent_valid.unsqueeze(0).expand(B, B) & child_valid.unsqueeze(1).expand(B, B)
 

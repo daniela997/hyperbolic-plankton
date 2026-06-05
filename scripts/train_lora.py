@@ -1,0 +1,193 @@
+"""Train HyperbolicCLIP with LoRA on the seen pool (HAC recipe), DDP over 2 GPUs.
+
+Launch:
+  PYTHONPATH=src torchrun --nproc_per_node=2 scripts/train_lora.py \
+      --backbone bioclip --iters 30000 --micro-bs 128 --accum 3
+
+Effective batch = micro_bs * world_size * accum (default 128*2*3 = 768, HAC).
+Recipe (HAC configs/train_hac_vit_b_lora.py): AdamW lr 2.5e-4 betas (0.9,0.98) wd 0.2
+(disabled for LN/bias + MERU scalars + LoRA), LinearWarmupCosineDecay 4k warmup, AMP,
+LoRA r=128 alpha=128 rslora on last 4 visual / last 8 text blocks (q,k,v,o).
+"""
+
+# A5000-specific: NCCL peer-to-peer is broken on these cards and hangs DDP. Must be set
+# BEFORE torch/NCCL init (NCCL reads the env var at process group creation).
+import os
+
+os.environ.setdefault("NCCL_P2P_DISABLE", "1")
+
+import argparse
+import time
+
+import torch
+import torch.distributed as dist
+from datasets import load_from_disk
+from torch.nn.parallel import DistributedDataParallel as DDP
+from torch.utils.data import DataLoader
+from torch.utils.data.distributed import DistributedSampler
+
+from hyperbolic_plankton.data import RANKS, HFTaxonomyDataset, split_seen_unseen
+from hyperbolic_plankton.loss import (
+    _deepest_text,
+    hyperbolic_contrastive_loss,
+    stacked_entailment_loss,
+)
+from hyperbolic_plankton.lora import apply_lora, count_trainable
+from hyperbolic_plankton.model import HyperbolicCLIP
+from hyperbolic_plankton.optim import LinearWarmupCosineDecayLR, param_groups
+from hyperbolic_plankton.train import TaxonomyCollator
+
+CACHE = "/scratch/daniela/planktonzilla_cache/plankton"
+CKPT_DIR = "/scratch/daniela/hyperbolic_plankton_ckpts"
+
+
+def is_main():
+    return not dist.is_initialized() or dist.get_rank() == 0
+
+
+def log(msg):
+    if is_main():
+        print(msg, flush=True)
+
+
+def forward_loss(model, pixel_values, taxonomy_batch, lambda_sel):
+    """contrastive(img, deepest_text) + lambda*SEL. `model` may be a DDP wrapper; geometry
+    helpers live on the underlying module."""
+    core = model.module if isinstance(model, DDP) else model
+    img = core.encode_image(pixel_values)
+    text_embs = core.encode_taxonomy(taxonomy_batch)
+    curv = core.curvature
+    scale = core.logit_scale.exp()
+    deepest, _ = _deepest_text(text_embs, RANKS)
+    cl = hyperbolic_contrastive_loss(img, deepest, curv, scale)
+    sel, intra, inter = stacked_entailment_loss(img, text_embs, taxonomy_batch, RANKS, curv)
+    return cl + lambda_sel * sel, cl.detach(), sel.detach()
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--backbone", default="bioclip", choices=["clip", "bioclip"])
+    ap.add_argument("--iters", type=int, default=30000)
+    ap.add_argument("--warmup", type=int, default=4000)
+    ap.add_argument("--micro-bs", type=int, default=128)
+    ap.add_argument("--accum", type=int, default=3)
+    ap.add_argument("--lr", type=float, default=2.5e-4)
+    ap.add_argument("--wd", type=float, default=0.2)
+    ap.add_argument("--lambda-sel", type=float, default=1.0)
+    ap.add_argument("--lora-r", type=int, default=128)
+    ap.add_argument("--num-workers", type=int, default=6)
+    ap.add_argument("--ckpt-every", type=int, default=2000)
+    ap.add_argument("--log-every", type=int, default=50)
+    ap.add_argument("--tag", default="bioclip_lora")
+    args = ap.parse_args()
+
+    ddp = "RANK" in os.environ
+    if ddp:
+        dist.init_process_group("nccl")
+        local_rank = int(os.environ["LOCAL_RANK"])
+        torch.cuda.set_device(local_rank)
+        device = torch.device("cuda", local_rank)
+        world = dist.get_world_size()
+    else:
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        world = 1
+    eff_batch = args.micro_bs * world * args.accum
+    log(f"backbone={args.backbone} world={world} micro_bs={args.micro_bs} "
+        f"accum={args.accum} -> effective batch={eff_batch}  iters={args.iters}")
+
+    # model + LoRA
+    model = apply_lora(HyperbolicCLIP(backbone=args.backbone), r=args.lora_r, alpha=args.lora_r)
+    model.to(device)
+    if is_main():
+        c = count_trainable(model)
+        log(f"trainable params: {c['trainable']:,} / {c['total']:,} "
+            f"({100 * c['trainable'] / c['total']:.2f}%)")
+    ddp_model = DDP(model, device_ids=[device.index], find_unused_parameters=True) if ddp else model
+
+    # data: seen pool only
+    log("loading cache + splitting seen/unseen...")
+    seen_ds, _ = split_seen_unseen(load_from_disk(CACHE))
+    train_ds = HFTaxonomyDataset(seen_ds)
+    log(f"seen training rows: {len(train_ds):,}")
+    collate = TaxonomyCollator(model.preprocess)
+    sampler = DistributedSampler(train_ds, shuffle=True, seed=0) if ddp else None
+    loader = DataLoader(
+        train_ds, batch_size=args.micro_bs, sampler=sampler, shuffle=(sampler is None),
+        num_workers=args.num_workers, collate_fn=collate, drop_last=True,
+        pin_memory=True, persistent_workers=True,
+    )
+
+    opt = torch.optim.AdamW(param_groups(model, args.wd), lr=args.lr, betas=(0.9, 0.98))
+    sched = LinearWarmupCosineDecayLR(opt, total_steps=args.iters, warmup_steps=args.warmup)
+    scaler = torch.amp.GradScaler("cuda")
+
+    os.makedirs(CKPT_DIR, exist_ok=True)
+    ddp_model.train()
+    it = 0
+    t0 = time.perf_counter()
+    run_cl = run_sel = run_loss = 0.0
+    data_iter = iter(loader)
+    epoch = 0
+    while it < args.iters:
+        opt.zero_grad(set_to_none=True)
+        # gradient accumulation: `accum` micro-batches per optimizer step
+        for micro in range(args.accum):
+            try:
+                pixel_values, taxonomy_batch, _ = next(data_iter)
+            except StopIteration:
+                epoch += 1
+                if sampler is not None:
+                    sampler.set_epoch(epoch)
+                data_iter = iter(loader)
+                pixel_values, taxonomy_batch, _ = next(data_iter)
+            pixel_values = pixel_values.to(device, non_blocking=True)
+            # only sync grads on the last micro-step (DDP no_sync on the others)
+            sync_ctx = (
+                ddp_model.no_sync()
+                if ddp and micro < args.accum - 1
+                else _nullctx()
+            )
+            with sync_ctx, torch.amp.autocast("cuda"):
+                loss, cl, sel = forward_loss(ddp_model, pixel_values, taxonomy_batch, args.lambda_sel)
+                loss = loss / args.accum
+            scaler.scale(loss).backward()
+            run_loss += loss.item() * args.accum
+            run_cl += cl.item()
+            run_sel += sel.item()
+
+        scaler.step(opt)
+        scaler.update()
+        sched.step()
+        model.clamp_params()
+        it += 1
+
+        if it % args.log_every == 0:
+            n = args.log_every * args.accum
+            ips = args.log_every * eff_batch / (time.perf_counter() - t0)
+            log(f"it {it:>6}/{args.iters} | loss {run_loss / args.log_every:.4f} "
+                f"cl {run_cl / n:.4f} sel {run_sel / n:.4f} | "
+                f"lr {sched.get_last_lr()[0]:.2e} | curv {model.curvature.item():.3f} | "
+                f"{ips:.0f} img/s")
+            run_cl = run_sel = run_loss = 0.0
+            t0 = time.perf_counter()
+
+        if is_main() and it % args.ckpt_every == 0:
+            path = os.path.join(CKPT_DIR, f"{args.tag}_it{it}.pt")
+            torch.save({"model": model.state_dict(), "it": it, "args": vars(args)}, path)
+            log(f"  saved {path}")
+
+    if is_main():
+        path = os.path.join(CKPT_DIR, f"{args.tag}_final.pt")
+        torch.save({"model": model.state_dict(), "it": it, "args": vars(args)}, path)
+        log(f"DONE. saved {path}")
+    if ddp:
+        dist.destroy_process_group()
+
+
+class _nullctx:
+    def __enter__(self): return None
+    def __exit__(self, *a): return False
+
+
+if __name__ == "__main__":
+    main()
