@@ -139,21 +139,34 @@ class HyperbolicCLIP(nn.Module):
         return self._lift(feats, self.textual_alpha) if project else feats
 
     def encode_taxonomy(
-        self, taxonomy_batch: dict[str, list[str | None]], project: bool = True
+        self,
+        taxonomy_batch: dict[str, list[str | None]],
+        project: bool = True,
+        ranks: list[str] | None = None,
+        indep: bool = False,
     ) -> dict[str, torch.Tensor]:
         """Encode per-rank taxonomy text into hyperbolic embeddings with validity masks.
 
         Args:
-            taxonomy_batch: {rank: [B] list of strings or None}. Keys starting with
-                "_" are skipped (collator metadata).
+            taxonomy_batch: {rank: [B] list of strings or None} (cumulative) plus optional
+                {rank}_indep (independent per-rank text). Keys starting with "_" are skipped.
+            ranks: which rank keys to encode (default: every non-"_", non-"_indep" key).
+            indep: if True, encode the `{rank}_indep` text (independent per-rank, for
+                SEL-intra) but still key the output by the plain rank name. If False (default)
+                encode the cumulative `{rank}` text (for contrastive + SEL-inter + eval).
         Returns:
-            {rank: [B, embed_dim]} with zeros for invalid (None) entries, plus
-            {f"{rank}_valid": [B] bool} marking which entries were encoded.
+            {rank: [B, embed_dim]} with zeros for invalid entries, plus {rank}_valid masks.
         """
+        if ranks is None:
+            # actual taxonomy ranks only: skip metadata ("_*"), the independent variants
+            # ("*_indep"), and the special "full" key (no per-rank independent form).
+            ranks = [
+                k for k in taxonomy_batch
+                if not k.startswith("_") and not k.endswith("_indep") and k != "full"
+            ]
         out: dict[str, torch.Tensor] = {}
-        for rank, texts in taxonomy_batch.items():
-            if rank.startswith("_"):
-                continue
+        for rank in ranks:
+            texts = taxonomy_batch[f"{rank}_indep" if indep else rank]
             valid = torch.tensor([t is not None for t in texts], dtype=torch.bool, device=self.device)
             emb = torch.zeros(len(texts), self.embed_dim, device=self.device)
             if valid.any():

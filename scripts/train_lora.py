@@ -104,9 +104,11 @@ def _run_periodic_eval(model, eval_sets, num_workers):
     with torch.no_grad():
         img = model.encode_image(pixel_values.to(model.device))
         text_embs = model.encode_taxonomy(taxonomy_batch)
+        intra_embs = model.encode_taxonomy(taxonomy_batch, indep=True)
         sel_stats: dict = {}
         _, intra, inter = stacked_entailment_loss(
-            img, text_embs, taxonomy_batch, RANKS, model.curvature, stats=sel_stats
+            img, text_embs, taxonomy_batch, RANKS, model.curvature,
+            stats=sel_stats, intra_text_embs=intra_embs,
         )
         out["loss_terms/sel_intra"] = float(intra)
         out["loss_terms/sel_inter"] = float(inter)
@@ -127,7 +129,7 @@ def log(msg):
         print(msg, flush=True)
 
 
-def forward_loss(model, pixel_values, taxonomy_batch, lambda_sel, stats=None):
+def forward_loss(model, pixel_values, taxonomy_batch, lambda_sel, stats=None, indep_intra=True):
     """contrastive(img, deepest_text) + lambda*SEL. `model` may be a DDP wrapper; geometry
     helpers live on the underlying module.
 
@@ -136,13 +138,16 @@ def forward_loss(model, pixel_values, taxonomy_batch, lambda_sel, stats=None):
     """
     core = model.module if isinstance(model, DDP) else model
     img = core.encode_image(pixel_values)
-    text_embs = core.encode_taxonomy(taxonomy_batch)
+    text_embs = core.encode_taxonomy(taxonomy_batch)  # cumulative (CL + SEL-inter)
     curv = core.curvature
     scale = core.logit_scale.exp()
     deepest, _ = _deepest_text(text_embs, RANKS)
     cl = hyperbolic_contrastive_loss(img, deepest, curv, scale)
+    # SEL-intra uses INDEPENDENT per-rank text (distinct concepts -> radial-separation
+    # gradient; avoids the cumulative near-collinearity that drove curvature collapse).
+    intra_embs = core.encode_taxonomy(taxonomy_batch, indep=True) if indep_intra else None
     sel, intra, inter = stacked_entailment_loss(
-        img, text_embs, taxonomy_batch, RANKS, curv, stats=stats
+        img, text_embs, taxonomy_batch, RANKS, curv, stats=stats, intra_text_embs=intra_embs
     )
     if stats is not None:
         stats["loss_terms/sel_intra"] = intra.detach().item()
@@ -160,6 +165,10 @@ def main():
     ap.add_argument("--lr", type=float, default=2.5e-4)
     ap.add_argument("--wd", type=float, default=0.2)
     ap.add_argument("--lambda-sel", type=float, default=1.0)
+    ap.add_argument("--cumulative-intra", action="store_true",
+                    help="use cumulative (not independent) per-rank text for SEL-intra "
+                         "(legacy; independent is the paper-faithful default that avoids "
+                         "the near-collinear curvature-collapse pathology)")
     ap.add_argument("--freeze-curv", action="store_true",
                     help="hold curvature fixed at init (removes the curvature-collapse "
                          "shortcut so SEL must update embeddings, not shrink cones)")
@@ -269,7 +278,8 @@ def main():
             step_stats = sel_terms if (is_log_iter and last_micro and is_main()) else None
             with sync_ctx, torch.amp.autocast("cuda"):
                 loss, cl, sel = forward_loss(
-                    ddp_model, pixel_values, taxonomy_batch, args.lambda_sel, stats=step_stats
+                    ddp_model, pixel_values, taxonomy_batch, args.lambda_sel,
+                    stats=step_stats, indep_intra=not args.cumulative_intra,
                 )
                 loss = loss / args.accum
             scaler.scale(loss).backward()

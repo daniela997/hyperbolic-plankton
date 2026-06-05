@@ -39,6 +39,8 @@ class TaxonomyCollator:
         taxonomy_batch: dict = {}
         for rank in self.ranks:
             taxonomy_batch[rank] = [item["taxonomy"][rank] for item in batch]
+            # independent per-rank text ("Rank: Value") for SEL-intra
+            taxonomy_batch[f"{rank}_indep"] = [item["taxonomy"][f"{rank}_indep"] for item in batch]
         taxonomy_batch["full"] = [item["taxonomy"]["full"] for item in batch]
         taxonomy_batch["_valid_ranks"] = [item["taxonomy"]["_valid_ranks"] for item in batch]
 

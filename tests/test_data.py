@@ -49,6 +49,10 @@ def test_build_taxonomy_cumulative_full_lineage():
     assert "folder" not in t and "proposed_label" not in t
     assert t["full"] == t["genus"]
     assert t["_valid_ranks"] == ["kingdom", "phylum", "class", "order", "family", "genus"]
+    # independent per-rank text ("Rank: Value") for SEL-intra — distinct, non-cumulative
+    assert t["kingdom_indep"] == "Kingdom: chromista"
+    assert t["genus_indep"] == "Genus: diatoma"  # bare rank value, NOT the lineage prefix
+    assert t["species_indep"] is None  # missing rank -> None in both forms
 
 
 def test_build_taxonomy_shallow_ragged():

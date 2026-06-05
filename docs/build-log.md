@@ -37,6 +37,39 @@ is ablatable. **Planned sweep: λ_sel ∈ {1.0, 0.5, 0.2}**, BioCLIP init, HAC r
 If λ=1.0 over-constrains (curvature collapse, contrastive alignment stalling), it may be
 too aggressive — the live curves will show this early; kill/adjust if so.
 
+### Root cause found: cumulative SEL text → curvature collapse (2026-06-05)
+
+After runs 1 (λ=1.0) and 2 (λ=0.2) BOTH collapsed identically (curv 1.0→0.32, F1
+peak~it2000 then halves), and a CL-only probe showed curv RISES without SEL, the cause
+was traced to **how SEL-intra encodes rank text**, not the SEL weight.
+
+**The bug:** our SEL-intra used **cumulative** lineage text per rank (genus =
+"animalia arthropoda copepoda", i.e. family-text + one word). Consecutive parent/child
+are then near-identical strings → near-collinear embeddings (measured cos: order→family
+**0.94**, genus→species 0.84, kingdom→phylum 0.60). SEL needs to push the child OUTWARD
+along the parent's ray, but near-collinear points give almost no radial-separation
+gradient. So the optimiser can't satisfy SEL by moving embeddings → it takes the cheap
+global shortcut: **shrink curvature to widen all cones at once**. (AdamW normalises the
+curv-gradient magnitude, so even λ=0.2 supplies enough *directional* pressure — explains
+why both λ collapsed alike.)
+
+**The paper says use per-rank text.** Hyperbolic-Taxonomies §3.1 gives the label format as
+structured per-rank fields ("Order: Diptera; Family: Syrphidae; Genus: …"), and Eq. 3's
+`T_r` is "the embedding **at rank** r"; §3.3 designs SEL for the **"nested and
+NON-overlapping"** hierarchy. Cumulative text is maximally *overlapping* (prefix nesting) —
+the opposite. The paper uses per-rank text for SEL and a separate concatenated "full text"
+only for the contrastive term. So our cumulative-for-SEL was the departure.
+
+**Measured fix (independent per-rank text):** cos drops to 0.18–0.42 (order→family 0.94→
+0.42, genus→species 0.84→0.18), dist ~doubles — distinct points SEL can actually separate
+radially, analogous to HAC's distinct object/scene inputs. **Curvature stays learnable**
+(MERU/HAC both learn it; freezing it would treat the symptom and just push the optimiser to
+the next shortcut, e.g. alpha). `--freeze-curv` kept only as a diagnostic, not the fix.
+
+**Resolved design:** SEL-intra → **independent per-rank text**; contrastive + SEL-inter +
+eval stay **cumulative `full`** (paper-faithful class label, validated vs Table 3). This is
+exactly the paper's per-rank-for-SEL / full-text-for-CL split.
+
 ### Run 1 result: λ_sel=1.0 → CURVATURE COLLAPSE (killed at it 7250, 2026-06-05)
 
 The caveat materialised. Trajectory (BioCLIP, λ=1.0, HAC recipe):

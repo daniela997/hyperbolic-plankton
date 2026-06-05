@@ -46,9 +46,19 @@ def _clean(v) -> str | None:
 def build_taxonomy(row: dict) -> dict:
     """Build the per-rank taxonomy dict for one row (real ranks only).
 
-    Each rank's string is the **cumulative** lineage through that rank (e.g. family =
-    "kingdom phylum class order family"); missing ranks are None. `full` is the deepest
-    cumulative string (or "unknown"). `_valid_ranks` lists the populated rank keys.
+    Each rank carries TWO text forms:
+      - `{rank}` = **cumulative** lineage through that rank (e.g. family =
+        "kingdom phylum class order family") — the paper's `tax_label`/`full` class string,
+        used by the contrastive loss, SEL-inter, and eval/prediction.
+      - `{rank}_indep` = **independent** per-rank text in the paper's "Rank: Value" form
+        (e.g. "Family: fragilariaceae") — used by SEL-intra. The paper (§3.1, Eq. 3 `T_r`)
+        encodes ranks independently and designs SEL for the "non-overlapping" hierarchy;
+        cumulative text makes consecutive ranks near-collinear (cos 0.6–0.94), starving
+        SEL of radial-separation gradient and driving curvature collapse. Independent text
+        restores distinct per-rank concepts (cos ~0.13–0.46). See build-log.
+
+    Missing ranks are None (both forms). `full` is the deepest cumulative string (or
+    "unknown"). `_valid_ranks` lists the populated rank keys.
 
     `proposed_label` is intentionally NOT a rank here — it is the class identity, carried
     separately by `HFTaxonomyDataset` (it is often a binomial overlapping Genus+Species).
@@ -63,9 +73,11 @@ def build_taxonomy(row: dict) -> dict:
         if val is not None:
             cumulative.append(val)
             taxonomy[key] = " ".join(cumulative)
+            taxonomy[f"{key}_indep"] = f"{col}: {val}"
             valid_ranks.append(key)
         else:
             taxonomy[key] = None
+            taxonomy[f"{key}_indep"] = None
 
     taxonomy["full"] = " ".join(cumulative) if cumulative else "unknown"
     taxonomy["_valid_ranks"] = valid_ranks

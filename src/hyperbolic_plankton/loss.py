@@ -272,11 +272,21 @@ def stacked_entailment_loss(
     margin: float = 0.1,
     use_negatives: bool = True,
     stats: dict | None = None,
+    intra_text_embs: dict[str, torch.Tensor] | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Full SEL = SEL-intra + SEL-inter. Returns (total, intra, inter).
 
+    `text_embs` are the CUMULATIVE per-rank embeddings (used by SEL-inter, since the image
+    is entailed by the deepest cumulative `full` text). `intra_text_embs`, if given, are the
+    INDEPENDENT per-rank embeddings used by SEL-intra (distinct per-rank concepts give the
+    radial-separation gradient SEL needs; see build-log). Falls back to `text_embs` for
+    intra when not provided (legacy cumulative behaviour). Positive/negative MASKING for
+    intra still uses the cumulative labels in `taxonomy_batch` (two samples share a parent
+    iff their cumulative lineage matches), independent of which text form is embedded.
+
     `stats` (if given) collects per-edge / per-term pos+neg components for logging.
     """
-    intra = sel_intra(text_embs, taxonomy_batch, ranks, curv, r_min, margin, use_negatives, stats=stats)
+    intra_embs = intra_text_embs if intra_text_embs is not None else text_embs
+    intra = sel_intra(intra_embs, taxonomy_batch, ranks, curv, r_min, margin, use_negatives, stats=stats)
     inter = sel_inter(img, text_embs, taxonomy_batch, ranks, curv, r_min, margin, use_negatives, stats=stats)
     return intra + inter, intra, inter
