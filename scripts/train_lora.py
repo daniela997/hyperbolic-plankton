@@ -278,9 +278,11 @@ def main():
         it += 1
 
         if it % args.log_every == 0:
+            # run_loss/run_cl/run_sel each accumulate `accum` micro-step values per iter,
+            # so all three average over n = log_every * accum contributions.
             n = args.log_every * args.accum
             ips = args.log_every * eff_batch / (time.perf_counter() - t0)
-            avg_loss, avg_cl, avg_sel = run_loss / args.log_every, run_cl / n, run_sel / n
+            avg_loss, avg_cl, avg_sel = run_loss / n, run_cl / n, run_sel / n
             lr = sched.get_last_lr()[0]
             log(f"it {it:>6}/{args.iters} | loss {avg_loss:.4f} cl {avg_cl:.4f} "
                 f"sel {avg_sel:.4f} | lr {lr:.2e} | curv {model.curvature.item():.3f} | "
