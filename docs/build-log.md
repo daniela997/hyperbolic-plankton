@@ -99,6 +99,41 @@ intra-per-edge + inter into pos/neg + pair counts; driver logs `loss_terms/*`. C
 with `geom/*`, the λ=0.2 run can distinguish *healthy* (sel pos ↓ **while** entail_ok ↑,
 radii spread) from *cheating* (pos ↓ but entail_ok stays 0, apertures widen uniformly).
 
+### SEL-inter operand: deepest rank (leaf), NOT all ranks — ✅ PAPER-FAITHFUL
+
+Question raised: shouldn't the image be entailed by *every* ancestor rank (transitivity),
+not just the leaf? Checked the paper (Hyperbolic Multimodal Repr. for Bio Taxonomies,
+2025), **Eq. 4**:
+
+> `L_SEL-inter = (1/3)·[ L_ent(I, T_R') + L_ent(D, T_R') + L_ent(I, D) ]`, where `T_R'` is
+> **the deepest available taxonomic label** (T_species if known, else T_genus, …).
+
+So SEL-inter **is leaf-only by design**, and our `_deepest_text`-based `sel_inter` matches
+it exactly. (We drop the DNA `D` terms — no DNA modality here; image↔deepest-text is the
+applicable part.) Given cumulative encoding, the deepest-rank embedding == the `full`
+embedding (same vector); `sel_inter` uses `_deepest_text` only to also get the rank id +
+validity mask for pos/neg masking.
+
+**Why leaf-only is sufficient (the transitivity rationale, which the question correctly
+identified):** the paper splits the labor — **SEL-intra (Eq. 3)** builds the nested chain
+`kingdom ⊐ phylum ⊐ … ⊐ species` among the *text* ranks, so containment is transitive;
+**SEL-inter** then anchors the image at the leaf only and *relies on* that chain to
+propagate the image into all ancestor cones. Entailing the image by every rank would be
+redundant **at convergence**.
+
+**Parked ablation — "stacked image-entailment":** the transitivity argument only holds
+once the intra chain has converged. Our diagnostic shows it has NOT (entail_ok=0,
+curvature collapse). A variant that entails the image by *every valid rank* (not just the
+leaf) would give direct gradient at each level during the un-converged phase — more robust,
+but a **departure from the paper** (non-comparable to its SEL). Decision: do NOT switch
+now. First get the intra chain to actually converge (λ tuning / curvature-collapse fix);
+if intra converges, leaf-only inter works as designed and this is moot. Keep stacked
+image-entailment as a later ablation only.
+
+**Aside (paper, §3.1):** stacked entailment is memory-heavy — they could only fit batch
+1520 on 4×A100-80GB "for experiments using stacked entailment". Confirms the B×B SEL grids
+are our memory driver; relevant if we ever push batch size past 768.
+
 ---
 
 ## Piece 1 — `lorentz.py` (geometry primitives)  ✅ VERIFIED
