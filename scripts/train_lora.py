@@ -103,12 +103,12 @@ def _run_periodic_eval(model, eval_sets, num_workers):
     # part of the loss is active — logged under loss_terms/*.
     with torch.no_grad():
         img = model.encode_image(pixel_values.to(model.device))
-        text_embs = model.encode_taxonomy(taxonomy_batch)
-        intra_embs = model.encode_taxonomy(taxonomy_batch, indep=True)
+        cum_embs = model.encode_taxonomy(taxonomy_batch)
+        sel_embs = model.encode_taxonomy(taxonomy_batch, indep=True)
         sel_stats: dict = {}
         _, intra, inter = stacked_entailment_loss(
-            img, text_embs, taxonomy_batch, RANKS, model.curvature,
-            stats=sel_stats, intra_text_embs=intra_embs,
+            img, cum_embs, taxonomy_batch, RANKS, model.curvature,
+            stats=sel_stats, sel_text_embs=sel_embs,
         )
         out["loss_terms/sel_intra"] = float(intra)
         out["loss_terms/sel_inter"] = float(inter)
@@ -138,16 +138,19 @@ def forward_loss(model, pixel_values, taxonomy_batch, lambda_sel, stats=None, in
     """
     core = model.module if isinstance(model, DDP) else model
     img = core.encode_image(pixel_values)
-    text_embs = core.encode_taxonomy(taxonomy_batch)  # cumulative (CL + SEL-inter)
     curv = core.curvature
     scale = core.logit_scale.exp()
-    deepest, _ = _deepest_text(text_embs, RANKS)
+    # Contrastive: align image to its deepest CUMULATIVE (`full`) text — the paper's
+    # full-text-for-CL.
+    cum_embs = core.encode_taxonomy(taxonomy_batch)
+    deepest, _ = _deepest_text(cum_embs, RANKS)
     cl = hyperbolic_contrastive_loss(img, deepest, curv, scale)
-    # SEL-intra uses INDEPENDENT per-rank text (distinct concepts -> radial-separation
-    # gradient; avoids the cumulative near-collinearity that drove curvature collapse).
-    intra_embs = core.encode_taxonomy(taxonomy_batch, indep=True) if indep_intra else None
+    # SEL (both intra AND inter) uses INDEPENDENT per-rank text `T_r` (paper Eq. 3 & 4):
+    # distinct per-rank concepts give the radial-separation gradient SEL needs and avoid
+    # the cumulative near-collinearity that drove curvature collapse.
+    sel_embs = core.encode_taxonomy(taxonomy_batch, indep=True) if indep_intra else cum_embs
     sel, intra, inter = stacked_entailment_loss(
-        img, text_embs, taxonomy_batch, RANKS, curv, stats=stats, intra_text_embs=intra_embs
+        img, cum_embs, taxonomy_batch, RANKS, curv, stats=stats, sel_text_embs=sel_embs
     )
     if stats is not None:
         stats["loss_terms/sel_intra"] = intra.detach().item()

@@ -66,9 +66,14 @@ radially, analogous to HAC's distinct object/scene inputs. **Curvature stays lea
 (MERU/HAC both learn it; freezing it would treat the symptom and just push the optimiser to
 the next shortcut, e.g. alpha). `--freeze-curv` kept only as a diagnostic, not the fix.
 
-**Resolved design:** SEL-intra → **independent per-rank text**; contrastive + SEL-inter +
-eval stay **cumulative `full`** (paper-faithful class label, validated vs Table 3). This is
-exactly the paper's per-rank-for-SEL / full-text-for-CL split.
+**Resolved design (corrected):** **BOTH** SEL terms use **independent per-rank text** `T_r`.
+Re-reading Eq. 4: SEL-inter entails the image by `T_R'` = the deepest *per-rank* label
+(`T_Species`/`T_Genus`/…) — the SAME `T_r` objects as Eq. 3, NOT the cumulative `full`
+string. The concatenated "full text" is used **only for contrastive alignment** ("Full-text
+supervision", p.4). So: SEL-intra + SEL-inter → independent `T_r`; **contrastive + eval →
+cumulative `full`** (paper-faithful class label, validated vs Table 3). Pos/neg masking in
+both SEL terms still keys on the cumulative lineage label. (Initially we mistakenly kept
+SEL-inter on cumulative text; fixed.)
 
 ### Run 1 result: λ_sel=1.0 → CURVATURE COLLAPSE (killed at it 7250, 2026-06-05)
 

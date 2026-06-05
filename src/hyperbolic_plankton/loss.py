@@ -238,11 +238,17 @@ def sel_inter(
 ) -> torch.Tensor:
     """Image entailed by its deepest available text (text is parent, image is child).
 
-    Positive pairs share the deepest-text label; negatives differ.
+    `text_embs` are the per-rank embeddings to draw the deepest text from. Paper Eq. 4
+    entails the image by `T_R'` = the deepest *per-rank* (independent) text — the SAME
+    `T_r` objects SEL-intra uses, just selected at the deepest valid rank (NOT the
+    cumulative `full` string; that is used only for contrastive alignment). So pass the
+    independent embeddings here. Positive pairs share the deepest-rank label; the labels
+    still come from the cumulative `taxonomy_batch` (two images share a leaf iff their
+    cumulative lineage matches).
     """
     deepest, chosen_rank = _deepest_text(text_embs, ranks)
     valid = torch.tensor([r is not None for r in chosen_rank], dtype=torch.bool, device=img.device)
-    # label per sample = the (rank, text) the deepest embedding came from
+    # label per sample = the cumulative lineage at the chosen deepest rank (for masking)
     labels = [
         taxonomy_batch[chosen_rank[i]][i] if chosen_rank[i] is not None else None
         for i in range(len(chosen_rank))
@@ -272,21 +278,21 @@ def stacked_entailment_loss(
     margin: float = 0.1,
     use_negatives: bool = True,
     stats: dict | None = None,
-    intra_text_embs: dict[str, torch.Tensor] | None = None,
+    sel_text_embs: dict[str, torch.Tensor] | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Full SEL = SEL-intra + SEL-inter. Returns (total, intra, inter).
 
-    `text_embs` are the CUMULATIVE per-rank embeddings (used by SEL-inter, since the image
-    is entailed by the deepest cumulative `full` text). `intra_text_embs`, if given, are the
-    INDEPENDENT per-rank embeddings used by SEL-intra (distinct per-rank concepts give the
-    radial-separation gradient SEL needs; see build-log). Falls back to `text_embs` for
-    intra when not provided (legacy cumulative behaviour). Positive/negative MASKING for
-    intra still uses the cumulative labels in `taxonomy_batch` (two samples share a parent
-    iff their cumulative lineage matches), independent of which text form is embedded.
+    Per the paper, BOTH SEL terms use the **per-rank (independent)** text embeddings `T_r`:
+    SEL-intra entails consecutive ranks (Eq. 3); SEL-inter entails the image by the deepest
+    per-rank text `T_R'` (Eq. 4). The cumulative/`full` text is used ONLY for contrastive
+    alignment, not for SEL. Pass those independent embeddings as `sel_text_embs`; if omitted
+    we fall back to `text_embs` (legacy cumulative behaviour). Positive/negative MASKING
+    still uses the cumulative labels in `taxonomy_batch` (two samples share a parent iff
+    their cumulative lineage matches), independent of which text form is embedded.
 
     `stats` (if given) collects per-edge / per-term pos+neg components for logging.
     """
-    intra_embs = intra_text_embs if intra_text_embs is not None else text_embs
-    intra = sel_intra(intra_embs, taxonomy_batch, ranks, curv, r_min, margin, use_negatives, stats=stats)
-    inter = sel_inter(img, text_embs, taxonomy_batch, ranks, curv, r_min, margin, use_negatives, stats=stats)
+    sel_embs = sel_text_embs if sel_text_embs is not None else text_embs
+    intra = sel_intra(sel_embs, taxonomy_batch, ranks, curv, r_min, margin, use_negatives, stats=stats)
+    inter = sel_inter(img, sel_embs, taxonomy_batch, ranks, curv, r_min, margin, use_negatives, stats=stats)
     return intra + inter, intra, inter
