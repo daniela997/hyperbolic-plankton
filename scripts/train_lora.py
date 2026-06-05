@@ -129,7 +129,7 @@ def log(msg):
         print(msg, flush=True)
 
 
-def forward_loss(model, pixel_values, taxonomy_batch, lambda_sel, stats=None, indep_intra=True):
+def forward_loss(model, pixel_values, taxonomy_batch, lambda_sel, stats=None, indep_intra=False):
     """contrastive(img, deepest_text) + lambda*SEL. `model` may be a DDP wrapper; geometry
     helpers live on the underlying module.
 
@@ -165,13 +165,17 @@ def main():
     ap.add_argument("--warmup", type=int, default=4000)
     ap.add_argument("--micro-bs", type=int, default=128)
     ap.add_argument("--accum", type=int, default=3)
-    ap.add_argument("--lr", type=float, default=2.5e-4)
-    ap.add_argument("--wd", type=float, default=0.2)
+    # Default optimiser = the Hyperbolic-Taxonomies (2025) SEL recipe, which the scratchpad
+    # validated as STABLE for frozen-backbone + projector (one-cycle peak 5e-5, wd 1e-4).
+    # HAC's 2.5e-4 / wd 0.2 (tuned for VQA/GRIT) collapsed curvature here — 5x the LR and
+    # 2000x the wd of the SEL recipe. See build-log.
+    ap.add_argument("--lr", type=float, default=5e-5)
+    ap.add_argument("--wd", type=float, default=1e-4)
     ap.add_argument("--lambda-sel", type=float, default=1.0)
-    ap.add_argument("--cumulative-intra", action="store_true",
-                    help="use cumulative (not independent) per-rank text for SEL-intra "
-                         "(legacy; independent is the paper-faithful default that avoids "
-                         "the near-collinear curvature-collapse pathology)")
+    ap.add_argument("--independent-intra", action="store_true",
+                    help="ABLATION: use independent per-rank text ('Rank: Value') for SEL "
+                         "instead of cumulative lineage. Default is cumulative, which the "
+                         "scratchpad showed performs better in the frozen+projector regime.")
     ap.add_argument("--freeze-curv", action="store_true",
                     help="hold curvature fixed at init (removes the curvature-collapse "
                          "shortcut so SEL must update embeddings, not shrink cones)")
@@ -282,7 +286,7 @@ def main():
             with sync_ctx, torch.amp.autocast("cuda"):
                 loss, cl, sel = forward_loss(
                     ddp_model, pixel_values, taxonomy_batch, args.lambda_sel,
-                    stats=step_stats, indep_intra=not args.cumulative_intra,
+                    stats=step_stats, indep_intra=args.independent_intra,
                 )
                 loss = loss / args.accum
             scaler.scale(loss).backward()

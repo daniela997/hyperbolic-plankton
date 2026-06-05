@@ -37,7 +37,44 @@ is ablatable. **Planned sweep: λ_sel ∈ {1.0, 0.5, 0.2}**, BioCLIP init, HAC r
 If λ=1.0 over-constrains (curvature collapse, contrastive alignment stalling), it may be
 too aggressive — the live curves will show this early; kill/adjust if so.
 
-### Root cause found: cumulative SEL text → curvature collapse (2026-06-05)
+### CORRECTION (2026-06-05): collapse was the LR/WD recipe, NOT the text encoding
+
+The "cumulative text → collapse" diagnosis below was **wrong** and is retracted. Decisive
+counter-evidence from the user's scratchpad (`mine/hyperbolic`):
+- The scratchpad is **frozen backbone + projector-only + CUMULATIVE text + learnable curv**
+  — and it is **stable AND best-performing** (cumulative consistently beat independent there).
+- That setup differs from ours in only one axis bundle: **the optimiser recipe (+ LoRA)**, NOT
+  the text. So cumulative text is exonerated; the collinearity-causes-collapse theory is refuted
+  by a near-identical stable setup using cumulative.
+
+**The actual cause — recipe mismatch.** We copied **HAC's** LoRA optimiser (tuned for VQA/GRIT)
+wholesale; the scratchpad used the **Hyperbolic-Taxonomies (2025) SEL recipe**:
+
+| | scratchpad (STABLE) | our run (COLLAPSE) |
+|---|---|---|
+| peak LR | **5e-5** (one-cycle) | 2.5e-4 (HAC) — **5×** |
+| weight decay | **1e-4** | 0.2 — **2000×** |
+| batch | 256 | 768 |
+| LoRA | none (projector only) | r=128 |
+
+5× the LR yanks the `curv` scalar; wd 0.2 actively drags trained params. That, not the text,
+is why curv collapsed (and why MERU/scratchpad with gentler recipes don't).
+
+**Correction applied:** driver defaults → **LR 5e-5, wd 1e-4** (the SEL recipe); **cumulative
+text is the default** again (independent demoted to `--independent-intra` ablation flag).
+Curvature stays learnable. Also worth testing **projector-only (no LoRA)** since that is exactly
+the scratchpad's stable config.
+
+**Why cumulative is also the *principled* choice (user's point):** a deeper rank's cumulative
+string is its parent's string + one token (prefix-extension) → the partial order is encoded in
+the text itself; child = parent + a small textual step → a small radial step out. The
+parent/child similarity that the retracted section called "collinear/bad" is just adjacency in
+the tree being preserved. Independent text discards that structural signal (and the measured
+performance advantage).
+
+> NOTE: the section below is RETRACTED — kept for the record of the (wrong) reasoning path.
+
+### [RETRACTED] Root cause found: cumulative SEL text → curvature collapse (2026-06-05)
 
 After runs 1 (λ=1.0) and 2 (λ=0.2) BOTH collapsed identically (curv 1.0→0.32, F1
 peak~it2000 then halves), and a CL-only probe showed curv RISES without SEL, the cause
