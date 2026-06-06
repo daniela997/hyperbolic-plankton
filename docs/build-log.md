@@ -60,10 +60,13 @@ wholesale; the scratchpad used the **Hyperbolic-Taxonomies (2025) SEL recipe**:
 5× the LR yanks the `curv` scalar; wd 0.2 actively drags trained params. That, not the text,
 is why curv collapsed (and why MERU/scratchpad with gentler recipes don't).
 
-**Correction applied:** driver defaults → **LR 5e-5, wd 1e-4** (the SEL recipe); **cumulative
-text is the default** again (independent demoted to `--independent-intra` ablation flag).
-Curvature stays learnable. Also worth testing **projector-only (no LoRA)** since that is exactly
-the scratchpad's stable config.
+**Correction applied (partial — deliberately one change at a time):** **cumulative text is the
+default** again (independent demoted to `--independent-intra` ablation flag). Curvature stays
+learnable. The LR/wd recipe is left at HAC's **2.5e-4 / 0.2** for now — we will change ONE
+variable at a time from this clean base (cumulative + HAC LR) rather than bundle the full SEL
+recipe in at once. LoRA stays central (projector-only capped out in the scratchpad, so it is
+NOT an ablation). The SEL recipe (5e-5 / 1e-4 / one-cycle) is the leading candidate for the
+first controlled probe but is not yet the default.
 
 **Why cumulative is also the *principled* choice (user's point):** a deeper rank's cumulative
 string is its parent's string + one token (prefix-extension) → the partial order is encoded in

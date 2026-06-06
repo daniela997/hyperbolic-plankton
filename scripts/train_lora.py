@@ -165,12 +165,8 @@ def main():
     ap.add_argument("--warmup", type=int, default=4000)
     ap.add_argument("--micro-bs", type=int, default=128)
     ap.add_argument("--accum", type=int, default=3)
-    # Default optimiser = the Hyperbolic-Taxonomies (2025) SEL recipe, which the scratchpad
-    # validated as STABLE for frozen-backbone + projector (one-cycle peak 5e-5, wd 1e-4).
-    # HAC's 2.5e-4 / wd 0.2 (tuned for VQA/GRIT) collapsed curvature here — 5x the LR and
-    # 2000x the wd of the SEL recipe. See build-log.
-    ap.add_argument("--lr", type=float, default=5e-5)
-    ap.add_argument("--wd", type=float, default=1e-4)
+    ap.add_argument("--lr", type=float, default=2.5e-4)
+    ap.add_argument("--wd", type=float, default=0.2)
     ap.add_argument("--lambda-sel", type=float, default=1.0)
     ap.add_argument("--independent-intra", action="store_true",
                     help="ABLATION: use independent per-rank text ('Rank: Value') for SEL "
