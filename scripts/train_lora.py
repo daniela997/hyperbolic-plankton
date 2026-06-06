@@ -181,6 +181,9 @@ def main():
                     help="hold curvature fixed at init (removes the curvature-collapse "
                          "shortcut so SEL must update embeddings, not shrink cones)")
     ap.add_argument("--lora-r", type=int, default=128)
+    ap.add_argument("--no-lora", action="store_true",
+                    help="projector-only (skip LoRA) = the scratchpad regime; for the "
+                         "disentangling probe of whether LoRA (not LR) drives the collapse")
     ap.add_argument("--no-reinit-final-ln", action="store_true",
                     help="keep CLIP's pretrained final-LN params (only unfreeze); default "
                          "re-inits to fresh LN as HAC does")
@@ -208,12 +211,14 @@ def main():
     log(f"backbone={args.backbone} world={world} micro_bs={args.micro_bs} "
         f"accum={args.accum} -> effective batch={eff_batch}  iters={args.iters}")
 
-    # model + LoRA
-    model = apply_lora(
-        HyperbolicCLIP(backbone=args.backbone, learn_curv=not args.freeze_curv),
-        r=args.lora_r, alpha=args.lora_r,
-        reinit_final_ln=not args.no_reinit_final_ln,
-    )
+    # model (+ LoRA unless --no-lora, which gives the scratchpad's projector-only regime:
+    # frozen backbone under no_grad, only projector + MERU scalars trainable).
+    model = HyperbolicCLIP(backbone=args.backbone, learn_curv=not args.freeze_curv)
+    if not args.no_lora:
+        model = apply_lora(
+            model, r=args.lora_r, alpha=args.lora_r,
+            reinit_final_ln=not args.no_reinit_final_ln,
+        )
     model.to(device)
     if is_main():
         c = count_trainable(model)
