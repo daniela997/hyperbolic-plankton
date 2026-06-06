@@ -48,7 +48,7 @@ def apply_lora(
     model,
     r: int = 8,
     alpha: int = 8,
-    dropout: float = 0.05,
+    dropout: float = 0.1,  # HAC lora_dropout
     adapt_visual_blocks: int = 4,
     adapt_text_blocks: int = 8,
     reinit_final_ln: bool = True,
