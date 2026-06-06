@@ -83,8 +83,12 @@ def _build_eval_sets(cache, args):
     }
 
 
-def _run_periodic_eval(model, eval_sets, num_workers):
-    """Eval seen-val + unseen subsamples + per-rank geometry; flat wandb-loggable dict."""
+def _run_periodic_eval(model, eval_sets, num_workers, indep_intra=False):
+    """Eval seen-val + unseen subsamples + per-rank geometry; flat wandb-loggable dict.
+
+    `indep_intra` must match training so the logged loss_terms reflect the SAME SEL the
+    optimiser sees (independent per-rank text iff training uses it; cumulative otherwise).
+    """
     from hyperbolic_plankton.train import TaxonomyCollator
 
     was_training = model.training
@@ -100,11 +104,12 @@ def _run_periodic_eval(model, eval_sets, num_workers):
     out.update(geometry_stats(model, taxonomy_batch))
 
     # per-term SEL (intra per edge + inter, pos/neg components) for understanding which
-    # part of the loss is active — logged under loss_terms/*.
+    # part of the loss is active — logged under loss_terms/*. Use the SAME text form as
+    # training (cumulative by default; independent only under the ablation flag).
     with torch.no_grad():
         img = model.encode_image(pixel_values.to(model.device))
         cum_embs = model.encode_taxonomy(taxonomy_batch)
-        sel_embs = model.encode_taxonomy(taxonomy_batch, indep=True)
+        sel_embs = model.encode_taxonomy(taxonomy_batch, indep=True) if indep_intra else cum_embs
         sel_stats: dict = {}
         _, intra, inter = stacked_entailment_loss(
             img, cum_embs, taxonomy_batch, RANKS, model.curvature,
@@ -328,7 +333,9 @@ def main():
         # periodic eval (rank 0). Other ranks wait at a barrier so DDP stays in lockstep.
         if it % args.eval_every == 0:
             if is_main():
-                metrics = _run_periodic_eval(model, eval_sets, args.num_workers)
+                metrics = _run_periodic_eval(
+                    model, eval_sets, args.num_workers, indep_intra=args.independent_intra
+                )
                 log(f"  [eval it {it}] "
                     f"unseen species_f1={metrics.get('eval/unseen/species_f1', 0):.4f} "
                     f"seen species_f1={metrics.get('eval/seen/species_f1', 0):.4f}")
