@@ -172,6 +172,12 @@ def main():
     ap.add_argument("--accum", type=int, default=3)
     ap.add_argument("--lr", type=float, default=2.5e-4)
     ap.add_argument("--wd", type=float, default=0.2)
+    ap.add_argument("--optimizer", default="adamw", choices=["adamw", "adam"],
+                    help="adamw=HAC; adam=Taxonomy-paper recipe")
+    ap.add_argument("--scheduler", default="warmupcos", choices=["warmupcos", "onecycle"],
+                    help="warmupcos=HAC linear-warmup+cos^2; onecycle=Taxonomy-paper OneCycleLR")
+    ap.add_argument("--onecycle-pct-start", type=float, default=0.3)
+    ap.add_argument("--onecycle-min-lr", type=float, default=1e-6)
     ap.add_argument("--lambda-sel", type=float, default=1.0)
     ap.add_argument("--independent-intra", action="store_true",
                     help="ABLATION: use independent per-rank text ('Rank: Value') for SEL "
@@ -246,8 +252,24 @@ def main():
         pin_memory=True, persistent_workers=True,
     )
 
-    opt = torch.optim.AdamW(param_groups(model, args.wd), lr=args.lr, betas=(0.9, 0.98))
-    sched = LinearWarmupCosineDecayLR(opt, total_steps=args.iters, warmup_steps=args.warmup)
+    # Optimizer: AdamW (HAC) or Adam (Taxonomy-paper recipe — wd added to grad, not decoupled).
+    pg = param_groups(model, args.wd)
+    if args.optimizer == "adam":
+        opt = torch.optim.Adam(pg, lr=args.lr, betas=(0.9, 0.98))
+    else:
+        opt = torch.optim.AdamW(pg, lr=args.lr, betas=(0.9, 0.98))
+
+    # Scheduler: HAC linear-warmup+cos², or the Taxonomy-paper OneCycleLR
+    # (max_lr, pct_start 0.3, cos anneal, div_factor=max_lr/min_lr, final_div_factor=1 so
+    # the floor is `min_lr`, not 0).
+    if args.scheduler == "onecycle":
+        sched = torch.optim.lr_scheduler.OneCycleLR(
+            opt, max_lr=args.lr, total_steps=args.iters,
+            pct_start=args.onecycle_pct_start, anneal_strategy="cos",
+            div_factor=args.lr / args.onecycle_min_lr, final_div_factor=1.0,
+        )
+    else:
+        sched = LinearWarmupCosineDecayLR(opt, total_steps=args.iters, warmup_steps=args.warmup)
     scaler = torch.amp.GradScaler("cuda")
 
     # wandb (rank 0 only): config = all hyperparams incl lambda_sel + effective batch.
