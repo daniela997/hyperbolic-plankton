@@ -13,6 +13,40 @@ LoRA**. Projector-only must work end-to-end before the LoRA tier.
 
 ---
 
+## Entailment/hyperparam audit vs HAC, MERU, UNCHA (2026-06-06)
+
+Read all four sources directly. Findings:
+
+**Correct in ours (verified vs source):** entailment direction `oxy_angle(parent,child) ≤
+half_aperture(parent)` with parent=apex=more-general (matches MERU/HAC/UNCHA); curv/alpha/
+logit_scale init + clamps (curv∈[init/10,init·10]; alpha.data≤0 so exp≤1; logit_scale≤ln100)
+— byte-for-byte MERU/HAC; projector init `Linear(width,dim,bias=False)`, `normal_(std=width^-0.5)`
+— identical; no-wd param grouping (LN/bias + scalars + lora) — matches HAC `set_weight_decay_per_param`.
+
+**Legitimate divergences (we follow Taxonomies/RCME for SEL, not MERU/HAC):** B×B grid +
+negative-entailment hinge (MERU/HAC/UNCHA do positives-only on the matched diagonal);
+SEL-intra across taxonomy ranks (no analogue in HAC/UNCHA). Inter/intra in HAC/UNCHA means
+text↔image vs part↔whole — NOT our rank↔rank; so HAC's 0.7/1.2 aperture thresholds do NOT
+map onto our ranks (earlier suggestion to copy them = retracted).
+
+**Two gaps FIXED this commit:**
+1. **Cross-GPU contrastive negatives (`dist_gather`).** MERU/HAC gather text/image across all
+   ranks (differentiable `torch.distributed.nn.all_gather`) so each image is scored vs the
+   GLOBAL batch; targets shifted by `B·rank`. We were contrastive-training on local
+   negatives only (128, not the effective batch). Added `hyperbolic_contrastive_loss_ddp`;
+   verified on a 2-GPU smoke (no deadlock under no_sync accumulation; cl rises with the
+   larger negative set, as expected). Caveat: grad-accum means this enlarges negatives per
+   micro-batch (→ micro_bs·world), not across accum steps — still a real gain, not the full 768.
+5. **Re-init final LN (HAC `init_final_ln`).** HAC resets each tower's final LN (γ=1,β=0)
+   when transitioning CLIP into the hyperbolic output space, then trains it. We only
+   unfroze it. Now `apply_lora(reinit_final_ln=True)` default; `--no-reinit-final-ln` to A/B.
+
+**Known remaining gaps (not adopted — candidate levers):** UNCHA continuous-angle term
+`+α·φ` (gradient even when child inside cone; scratchpad has it as `angle_alpha`); HAC/UNCHA
+aperture thresholds (semantics don't map); UNCHA uncertainty calibration (deferred).
+
+---
+
 ## Training plan — λ_sel sweep (recorded before first launch, 2026-06-05)
 
 Loss = `contrastive(img, deepest_text) + λ_sel · SEL`. `λ_sel` is logged to wandb so it

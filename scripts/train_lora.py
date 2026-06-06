@@ -38,7 +38,7 @@ from hyperbolic_plankton.eval import (
 )
 from hyperbolic_plankton.loss import (
     _deepest_text,
-    hyperbolic_contrastive_loss,
+    hyperbolic_contrastive_loss_ddp,
     stacked_entailment_loss,
 )
 from hyperbolic_plankton.lora import apply_lora, count_trainable
@@ -144,7 +144,7 @@ def forward_loss(model, pixel_values, taxonomy_batch, lambda_sel, stats=None, in
     # full-text-for-CL.
     cum_embs = core.encode_taxonomy(taxonomy_batch)
     deepest, _ = _deepest_text(cum_embs, RANKS)
-    cl = hyperbolic_contrastive_loss(img, deepest, curv, scale)
+    cl = hyperbolic_contrastive_loss_ddp(img, deepest, curv, scale)
     # SEL (both intra AND inter) uses INDEPENDENT per-rank text `T_r` (paper Eq. 3 & 4):
     # distinct per-rank concepts give the radial-separation gradient SEL needs and avoid
     # the cumulative near-collinearity that drove curvature collapse.
@@ -176,6 +176,9 @@ def main():
                     help="hold curvature fixed at init (removes the curvature-collapse "
                          "shortcut so SEL must update embeddings, not shrink cones)")
     ap.add_argument("--lora-r", type=int, default=128)
+    ap.add_argument("--no-reinit-final-ln", action="store_true",
+                    help="keep CLIP's pretrained final-LN params (only unfreeze); default "
+                         "re-inits to fresh LN as HAC does")
     ap.add_argument("--num-workers", type=int, default=6)
     ap.add_argument("--ckpt-every", type=int, default=2000)
     ap.add_argument("--log-every", type=int, default=50)
@@ -204,6 +207,7 @@ def main():
     model = apply_lora(
         HyperbolicCLIP(backbone=args.backbone, learn_curv=not args.freeze_curv),
         r=args.lora_r, alpha=args.lora_r,
+        reinit_final_ln=not args.no_reinit_final_ln,
     )
     model.to(device)
     if is_main():

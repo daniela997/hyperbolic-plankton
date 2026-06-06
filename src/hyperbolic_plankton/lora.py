@@ -51,11 +51,18 @@ def apply_lora(
     dropout: float = 0.05,
     adapt_visual_blocks: int = 4,
     adapt_text_blocks: int = 8,
+    reinit_final_ln: bool = True,
 ):
-    """Swap MHA → split linears, wrap last-N blocks with LoRA, unfreeze final LN.
+    """Swap MHA → split linears, wrap last-N blocks with LoRA, train the final LN.
 
     Mutates `model.clip` in place. `model` is a `HyperbolicCLIP` whose backbone is
     already frozen. Returns `model`.
+
+    `reinit_final_ln` (HAC `init_final_ln`, default True): reset each tower's final
+    LayerNorm to γ=1, β=0 before training it. HAC re-initializes (not just unfreezes) the
+    final LN when transitioning CLIP into the new hyperbolic output space — the old LN was
+    calibrated for CLIP's output distribution, which no longer applies after the projection
+    change. Set False to keep CLIP's pretrained LN params and only unfreeze them.
     """
     clip = model.clip
     replace_mha_with_plain(clip.visual)
@@ -76,11 +83,14 @@ def apply_lora(
     # get_peft_model freezes everything it doesn't adapt and marks LoRA params trainable.
     model.clip = get_peft_model(clip, cfg)
 
-    # Unfreeze the final LayerNorm of each tower (HAC §4.4: must train or it gates output).
-    for p in _final_ln(model.clip, "visual").parameters():
-        p.requires_grad = True
-    for p in _final_ln(model.clip, "text").parameters():
-        p.requires_grad = True
+    # Final LayerNorm of each tower (HAC §4.4: must train or it gates the output). HAC also
+    # re-initializes it (init_final_ln) to fit the new hyperbolic output space.
+    for tower in ("visual", "text"):
+        ln = _final_ln(model.clip, tower)
+        if reinit_final_ln:
+            ln.reset_parameters()  # γ=1, β=0 — fresh LN, as HAC does
+        for p in ln.parameters():
+            p.requires_grad = True
 
     # The backbone forward must now build a graph so gradients reach the LoRA adapters;
     # freezing is enforced by requires_grad alone (HAC relies on this, not no_grad).

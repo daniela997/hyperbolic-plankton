@@ -34,12 +34,60 @@ __all__ = [
 def hyperbolic_contrastive_loss(
     img: torch.Tensor, text: torch.Tensor, curv: torch.Tensor | float, scale: torch.Tensor | float
 ) -> torch.Tensor:
-    """Symmetric InfoNCE with logits = -pairwise_dist * scale (MERU)."""
+    """Symmetric InfoNCE with logits = -pairwise_dist * scale (MERU).
+
+    Single-process / square (B×B) form. For DDP with cross-GPU negatives use
+    `hyperbolic_contrastive_loss_ddp`, which gathers text/image across processes so each
+    image is scored against the GLOBAL batch (MERU/HAC behaviour).
+    """
     B = img.shape[0]
     dist = L.pairwise_dist(img, text, curv)
     logits = -dist * scale
     targets = torch.arange(B, device=img.device)
     return 0.5 * (F.cross_entropy(logits, targets) + F.cross_entropy(logits.T, targets))
+
+
+def _gather_across_processes(t: torch.Tensor) -> torch.Tensor:
+    """Differentiable all-gather → [B*world, D] (gradients scatter back to each rank).
+
+    Mirrors HAC's `gather_across_processes` (uses `torch.distributed.nn.all_gather`, the
+    autograd-aware variant — plain `dist.all_gather` would detach the other ranks). Returns
+    the input unchanged when not running under DDP.
+    """
+    import torch.distributed as dist
+
+    if not (dist.is_available() and dist.is_initialized()) or dist.get_world_size() == 1:
+        return t
+    from torch.distributed.nn import all_gather as nn_all_gather
+
+    return torch.cat(list(nn_all_gather(t)), dim=0)
+
+
+def hyperbolic_contrastive_loss_ddp(
+    img: torch.Tensor, text: torch.Tensor, curv: torch.Tensor | float, scale: torch.Tensor | float
+) -> torch.Tensor:
+    """MERU/HAC contrastive loss with cross-GPU negatives.
+
+    Each rank's local `img`/`text` (B) are scored against the GLOBALLY gathered
+    text/image (B*world), so the negative set is the full effective batch — not just the
+    local micro-batch. Targets are shifted by `B * rank` to hit the matched diagonal in the
+    gathered set. Falls back to the local square loss when not under DDP.
+    """
+    import torch.distributed as dist
+
+    if not (dist.is_available() and dist.is_initialized()) or dist.get_world_size() == 1:
+        return hyperbolic_contrastive_loss(img, text, curv, scale)
+
+    B = img.shape[0]
+    rank = dist.get_rank()
+    all_img = _gather_across_processes(img)
+    all_text = _gather_across_processes(text)
+
+    # local image vs all text; local text vs all image (MERU/HAC orientation)
+    img_logits = -L.pairwise_dist(img, all_text, curv) * scale   # [B, B*world]
+    text_logits = -L.pairwise_dist(text, all_img, curv) * scale  # [B, B*world]
+    targets = torch.arange(B, device=img.device) + B * rank
+    return 0.5 * (F.cross_entropy(img_logits, targets) + F.cross_entropy(text_logits, targets))
 
 
 def entailment_pos(
