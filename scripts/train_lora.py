@@ -178,6 +178,9 @@ def main():
                     help="warmupcos=HAC linear-warmup+cos^2; onecycle=Taxonomy-paper OneCycleLR")
     ap.add_argument("--onecycle-pct-start", type=float, default=0.3)
     ap.add_argument("--onecycle-min-lr", type=float, default=1e-6)
+    ap.add_argument("--curv-lr-scale", type=float, default=1.0,
+                    help="LR multiplier for geometry scalars (curv, alphas); <1 slows them "
+                         "so the hierarchy is learned via embeddings, not curvature collapse")
     ap.add_argument("--lambda-sel", type=float, default=1.0)
     ap.add_argument("--independent-intra", action="store_true",
                     help="ABLATION: use independent per-rank text ('Rank: Value') for SEL "
@@ -253,18 +256,23 @@ def main():
     )
 
     # Optimizer: AdamW (HAC) or Adam (Taxonomy-paper recipe — wd added to grad, not decoupled).
-    pg = param_groups(model, args.wd)
+    # --curv-lr-scale (<1) puts the geometry scalars (curv, alphas) in a slower group so the
+    # model learns the hierarchy via embeddings instead of cheaply shrinking curv to widen cones.
+    geom_scale = args.curv_lr_scale if args.curv_lr_scale < 1.0 else None
+    pg = param_groups(model, args.wd, base_lr=args.lr, geom_lr_scale=geom_scale)
     if args.optimizer == "adam":
         opt = torch.optim.Adam(pg, lr=args.lr, betas=(0.9, 0.98))
     else:
         opt = torch.optim.AdamW(pg, lr=args.lr, betas=(0.9, 0.98))
+    if geom_scale is not None:
+        log(f"geom scalars (curv/alpha) at lr x{geom_scale} = {args.lr * geom_scale:.2e}")
 
-    # Scheduler: HAC linear-warmup+cos², or the Taxonomy-paper OneCycleLR
-    # (max_lr, pct_start 0.3, cos anneal, div_factor=max_lr/min_lr, final_div_factor=1 so
-    # the floor is `min_lr`, not 0).
+    # Scheduler: HAC linear-warmup+cos², or the Taxonomy-paper OneCycleLR. Per-group max_lr
+    # preserves the geom group's slower LR through the one-cycle schedule.
     if args.scheduler == "onecycle":
+        max_lrs = [g.get("lr_scale", 1.0) * args.lr for g in pg]
         sched = torch.optim.lr_scheduler.OneCycleLR(
-            opt, max_lr=args.lr, total_steps=args.iters,
+            opt, max_lr=max_lrs, total_steps=args.iters,
             pct_start=args.onecycle_pct_start, anneal_strategy="cos",
             div_factor=args.lr / args.onecycle_min_lr, final_div_factor=1.0,
         )

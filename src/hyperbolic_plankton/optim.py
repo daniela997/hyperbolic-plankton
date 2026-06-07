@@ -23,14 +23,30 @@ _NORM_CLASSES = (
 )
 
 
-def param_groups(model: torch.nn.Module, weight_decay: float) -> list[dict]:
-    """AdamW param groups: `excluded`/`gain_bias` get wd=0, `regular` gets `weight_decay`.
+# Geometry scalars that control embedding RADIUS / cone width — the cheap curvature-
+# collapse levers. Optionally given their own slower LR so the model must learn the
+# hierarchy via embeddings, not by shrinking curv / alpha to widen cones.
+_GEOM_SCALAR_NAMES = ("curv", "visual_alpha", "textual_alpha")
 
-    Mirrors HAC `set_weight_decay_per_param` with `gain_bias_decay=0.0` and
-    `exclude_params=[scalars..., "lora_"]`. Only `requires_grad` params are included.
+
+def param_groups(
+    model: torch.nn.Module, weight_decay: float, base_lr: float | None = None,
+    geom_lr_scale: float | None = None,
+) -> list[dict]:
+    """AdamW param groups: `gain_bias`/scalars/LoRA get wd=0, `regular` gets `weight_decay`.
+
+    Mirrors HAC `set_weight_decay_per_param` (gain_bias_decay=0.0, scalars+lora excluded).
+    Only `requires_grad` params are included.
+
+    If `geom_lr_scale` is set (with `base_lr`), the geometry scalars (curv, visual_alpha,
+    textual_alpha) are split into their own group with `lr = base_lr * geom_lr_scale` and an
+    `lr_scale` tag, so the curvature/radius knobs move slower than the projector/LoRA. This
+    forces hierarchy learning into the embeddings instead of cheap cone-widening. logit_scale
+    stays at the main LR (it's a contrastive-temperature, not a geometry lever).
     """
-    decay, no_decay = [], []
+    decay, no_decay, geom = [], [], []
     seen = set()
+    split_geom = geom_lr_scale is not None and base_lr is not None
 
     def visit(module, prefix=""):
         for name, p in module.named_parameters(recurse=False):
@@ -38,7 +54,9 @@ def param_groups(model: torch.nn.Module, weight_decay: float) -> list[dict]:
                 continue
             seen.add(p)
             full = f"{prefix}.{name}" if prefix else name
-            if any(s in full for s in _NO_DECAY_NAMES):
+            if split_geom and name.split(".")[-1] in _GEOM_SCALAR_NAMES:
+                geom.append(p)                   # slow geometry-scalar group (wd 0)
+            elif any(s in full for s in _NO_DECAY_NAMES):
                 no_decay.append(p)               # excluded scalars + LoRA
             elif isinstance(module, _NORM_CLASSES) or "bias" in name:
                 no_decay.append(p)               # gain_bias (decay 0.0)
@@ -53,6 +71,9 @@ def param_groups(model: torch.nn.Module, weight_decay: float) -> list[dict]:
         groups.append({"params": decay, "weight_decay": weight_decay, "name": "regular"})
     if no_decay:
         groups.append({"params": no_decay, "weight_decay": 0.0, "name": "no_decay"})
+    if geom:
+        groups.append({"params": geom, "weight_decay": 0.0, "name": "geom",
+                       "lr": base_lr * geom_lr_scale, "lr_scale": geom_lr_scale})
     return groups
 
 
