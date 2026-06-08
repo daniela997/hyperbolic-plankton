@@ -119,15 +119,39 @@ def hyperbolic_angle_contrastive_loss_ddp(
 
 
 def entailment_pos(
-    parent: torch.Tensor, child: torch.Tensor, curv: torch.Tensor | float, r_min: float = 0.1
+    parent: torch.Tensor, child: torch.Tensor, curv: torch.Tensor | float,
+    r_min: float = 0.1, tau: float = 1.0, leak: float = 0.0, lam_u: float = 0.0,
 ) -> torch.Tensor:
     """Positive entailment hinge: child should lie inside parent's cone.
 
-    L = relu(oxy_angle(parent, child) - half_aperture(parent)). Returns shape (...,).
+    Base: L = relu(oxy_angle(parent, child) - tau * half_aperture(parent)).
+
+    Two optional terms (adapted from UNCHA, arXiv 2603.22042) that fix the upper-rank
+    collapse — once a child is contained the bare hinge gives ZERO gradient, so ranks pile
+    at the origin where the cone saturates to pi/2:
+
+    - `leak` (>0): always-on `leak * oxy_angle`, a Leaky-ReLU-style continued gradient that
+      keeps pulling the child onto the parent's radial axis even when already contained
+      (UNCHA Eq. 14). Aligning children to the axis + their distinctness from the parent
+      forces them apart in RADIUS (the only free dimension left on a shared ray).
+    - `tau` (<1): tightens the effective cone (tau * aperture), countering the pi/2
+      saturation so the hinge stays active longer.
+    - `lam_u` (>0): `lam_u * softplus(-||parent||)` = a radius/uncertainty penalty (UNCHA
+      Eq. 7/15 core). softplus(-||x||) is high near the origin, so this pushes the PARENT
+      outward — breaking the radial-direction symmetry so children end up DEEPER, and giving
+      ragged leaves a depth-appropriate (uncertainty-appropriate) radius for free.
+
+    All three are scale-free / angular (no radial margin tuned to the geometry). Defaults
+    (tau=1, leak=0, lam_u=0) reproduce the plain hinge exactly.
     """
     angle = L.oxy_angle(parent, child, curv)
     aperture = L.half_aperture(parent, curv, min_radius=r_min)
-    return F.relu(angle - aperture)
+    loss = F.relu(angle - tau * aperture)
+    if leak > 0.0:
+        loss = loss + leak * angle
+    if lam_u > 0.0:
+        loss = loss + lam_u * F.softplus(-torch.linalg.norm(parent, dim=-1))
+    return loss
 
 
 def entailment_neg(
@@ -170,6 +194,9 @@ def _edge_loss(
     use_negatives: bool,
     stats: dict | None = None,
     stats_key: str = "",
+    tau: float = 1.0,
+    leak: float = 0.0,
+    lam_u: float = 0.0,
 ) -> torch.Tensor:
     """Entailment loss for one (parent_rank -> child_rank) edge over the B×B grid.
 
@@ -210,7 +237,7 @@ def _edge_loss(
     p_grid = parent.unsqueeze(0).expand(B, -1, -1).reshape(B * B, -1)
     c_grid = child.unsqueeze(1).expand(-1, B, -1).reshape(B * B, -1)
 
-    pos_all = entailment_pos(p_grid, c_grid, curv, r_min).reshape(B, B)
+    pos_all = entailment_pos(p_grid, c_grid, curv, r_min, tau, leak, lam_u).reshape(B, B)
     if pos_mask.any():
         pos_loss = pos_all[pos_mask].mean()
     else:
@@ -242,6 +269,9 @@ def sel_intra(
     margin: float = 0.1,
     use_negatives: bool = True,
     stats: dict | None = None,
+    tau: float = 1.0,
+    leak: float = 0.0,
+    lam_u: float = 0.0,
 ) -> torch.Tensor:
     """Stacked entailment between consecutive ranks (paper Eq. 3).
 
@@ -275,6 +305,9 @@ def sel_intra(
             use_negatives=use_negatives,
             stats=stats,
             stats_key=f"sel_intra/{parent_rank}->{child_rank}",
+            tau=tau,
+            leak=leak,
+            lam_u=lam_u,
         )
         total = loss if total is None else total + loss
     return total / len(edges)
@@ -355,6 +388,9 @@ def stacked_entailment_loss(
     use_negatives: bool = True,
     stats: dict | None = None,
     sel_text_embs: dict[str, torch.Tensor] | None = None,
+    tau: float = 1.0,
+    leak: float = 0.0,
+    lam_u: float = 0.0,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Full SEL = SEL-intra + SEL-inter. Returns (total, intra, inter).
 
@@ -369,6 +405,7 @@ def stacked_entailment_loss(
     `stats` (if given) collects per-edge / per-term pos+neg components for logging.
     """
     sel_embs = sel_text_embs if sel_text_embs is not None else text_embs
-    intra = sel_intra(sel_embs, taxonomy_batch, ranks, curv, r_min, margin, use_negatives, stats=stats)
+    intra = sel_intra(sel_embs, taxonomy_batch, ranks, curv, r_min, margin, use_negatives,
+                      stats=stats, tau=tau, leak=leak, lam_u=lam_u)
     inter = sel_inter(img, sel_embs, taxonomy_batch, ranks, curv, r_min, margin, use_negatives, stats=stats)
     return intra + inter, intra, inter

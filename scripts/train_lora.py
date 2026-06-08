@@ -158,7 +158,8 @@ def log(msg):
 
 
 def forward_loss(model, pixel_values, taxonomy_batch, lambda_sel, stats=None,
-                 indep_intra=False, contrastive="distance", ranks=RANKS):
+                 indep_intra=False, contrastive="distance", ranks=RANKS,
+                 sel_tau=1.0, sel_leak=0.0, sel_uncertainty=0.0):
     """contrastive(img, deepest_text) + lambda*SEL. `model` may be a DDP wrapper; geometry
     helpers live on the underlying module.
 
@@ -181,7 +182,8 @@ def forward_loss(model, pixel_values, taxonomy_batch, lambda_sel, stats=None,
     # the cumulative near-collinearity that drove curvature collapse.
     sel_embs = core.encode_taxonomy(taxonomy_batch, indep=True) if indep_intra else cum_embs
     sel, intra, inter = stacked_entailment_loss(
-        img, cum_embs, taxonomy_batch, ranks, curv, stats=stats, sel_text_embs=sel_embs
+        img, cum_embs, taxonomy_batch, ranks, curv, stats=stats, sel_text_embs=sel_embs,
+        tau=sel_tau, leak=sel_leak, lam_u=sel_uncertainty,
     )
     if stats is not None:
         stats["loss_terms/sel_intra"] = intra.detach().item()
@@ -214,6 +216,18 @@ def main():
     ap.add_argument("--contrastive", default="distance", choices=["distance", "angle"],
                     help="distance=MERU InfoNCE on -pairwise_dist; angle=ATMG exterior-angle "
                          "InfoNCE (radius-free, same oxy_angle quantity as SEL)")
+    # SEL-intra anti-collapse terms (UNCHA-inspired). Defaults reproduce the plain hinge.
+    ap.add_argument("--sel-leak", type=float, default=0.0,
+                    help="Leaky-entailment factor: always-on `leak*oxy_angle` keeps pulling "
+                         "children onto the parent axis after containment (UNCHA Eq.14). "
+                         "Aligned axis + distinctness => radial separation. 0=off")
+    ap.add_argument("--sel-tau", type=float, default=1.0,
+                    help="Aperture threshold (<1 tightens the cone: tau*aperture), countering "
+                         "the pi/2 saturation so the hinge stays active. 1.0=off")
+    ap.add_argument("--sel-uncertainty", type=float, default=0.0,
+                    help="Radius/uncertainty penalty weight: `lam_u*softplus(-||parent||)` "
+                         "pushes parents off the origin so children end up deeper, and gives "
+                         "ragged leaves depth-appropriate radius (UNCHA Eq.7/15). 0=off")
     ap.add_argument("--independent-intra", action="store_true",
                     help="ABLATION: use independent per-rank text ('Rank: Value') for SEL "
                          "instead of cumulative lineage. Default is cumulative, which the "
@@ -364,6 +378,8 @@ def main():
                     ddp_model, pixel_values, taxonomy_batch, args.lambda_sel,
                     stats=step_stats, indep_intra=args.independent_intra,
                     contrastive=args.contrastive, ranks=ranks,
+                    sel_tau=args.sel_tau, sel_leak=args.sel_leak,
+                    sel_uncertainty=args.sel_uncertainty,
                 )
                 loss = loss / args.accum
             scaler.scale(loss).backward()

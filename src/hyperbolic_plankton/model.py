@@ -26,7 +26,7 @@ __all__ = ["build_backbone", "HyperbolicCLIP"]
 # open_clip identifiers for the two inits we use. OpenAI weights expect QuickGELU, so
 # we load the `-quickgelu` arch variant to avoid the activation mismatch warning.
 _BACKBONES = {
-    "clip": dict(model_name="ViT-B-16-quickgelu", pretrained="openai"),
+    "clip": dict(model_name="ViT-B-16", pretrained="openai"),
     "bioclip": dict(model_name="hf-hub:imageomics/bioclip", pretrained=None),
 }
 
