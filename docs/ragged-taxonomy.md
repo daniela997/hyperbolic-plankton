@@ -68,6 +68,45 @@ Implication: the seen/unseen split (held-out *sources*) also shifts the depth pr
 Branching is **highest at the top** (kingdom→phylum 5.33) and decreases with depth — it does
 NOT hump in the middle.
 
+### Tree topology: nodes that are BOTH leaf and parent, and DEAD-END lineages
+
+Because depth varies per sample, a node can be **a leaf** (the deepest rank for some samples
+→ gets images via SEL-inter) AND **a parent** (other samples go deeper → gets child-text via
+SEL-intra). Counts of distinct nodes per rank (400k sample):
+
+| rank | #nodes | #leaf | #parent | #BOTH |
+|---|---|---|---|---|
+| phylum | 24 | 14 | 21 | 11 |
+| class | 49 | 22 | 43 | 16 |
+| order | 111 | 32 | 95 | 16 |
+| family | 167 | 45 | 133 | 11 |
+| genus | 177 | 129 | 83 | **35** |
+| species | 112 | 112 | 0 | 0 |
+
+Dozens of internal nodes are **both** — e.g. 35 genus nodes hold both an image (genus-deep
+samples) and a deeper species-text (species-deep samples) in the same cone. These signals
+REINFORCE (both say "be a well-formed parent cone"), so it's healthy, not contradictory.
+
+**Dead-end lineages** — a "leaf" node that NO sample ever extends deeper (an annotation
+artifact, a shallow terminal node, not a biological species). Fraction of leaf-anchored
+images sitting at a dead-end, by leaf rank:
+
+| leaf rank | leaf imgs | dead-end imgs | % dead-end |
+|---|---|---|---|
+| phylum | 30,700 | 9,285 | 30.2% |
+| class | 64,061 | 2,416 | 3.8% |
+| order | 92,197 | 12,413 | 13.5% |
+| family | 79,239 | 66,116 | **83.4%** |
+| genus | 104,014 | 48,168 | 46.3% |
+| species | 24,199 | 24,199 | 100% (by def.) |
+
+**Key fact: 83% of family-deep and 46% of genus-deep images are dead-ends** — they anchor at
+nodes nothing extends past. These images nest in **shallow, wide cones** (family ≈ 0.37
+radius, wide aperture) and CANNOT be tightly localized (no finer structure exists for them).
+This is a large, correctly-but-loosely-placed image population, intrinsic to ragged plankton
+taxonomy. (It does NOT happen with complete taxonomy like BIOSCAN, where species is always
+the leaf.)
+
 ## Consequences for the construction
 
 - **CL anchors images to the deepest cumulative text**, which (per the table) is a broad
@@ -105,6 +144,10 @@ margin; the SEL negatives are inactive at convergence, intra AND inter. So the
   **REFUTED on real data.** This was based on a biased source-ordered 300k slice that gave
   order=2.2% deepest; the real train split gives **order = 23% deepest** (well-anchored).
   Lesson: always compute depth stats on a random sample of the real split.
+- *Dead-end image load* ("mid-ranks carry the most dead-end image anchors, pinning their
+  cones wide") — **REFUTED.** Dead-end % does NOT correlate with the hump: `genus→species`
+  has 100% dead-end load but LOW loss (0.15); `class→order` has only ~13% dead-end load but
+  HIGH loss (0.66). So dead-end load is a real data property (above) but not the hump cause.
 
 **Still-plausible, NOT yet verified:**
 - *Radius regime*: mid-rank parent cone width vs child angular spread is the unlucky middle
