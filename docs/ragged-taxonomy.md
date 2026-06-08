@@ -107,6 +107,30 @@ This is a large, correctly-but-loosely-placed image population, intrinsic to rag
 taxonomy. (It does NOT happen with complete taxonomy like BIOSCAN, where species is always
 the leaf.)
 
+### What's left if you filter to complete-to-species lineages
+
+To isolate raggedness *within* the plankton domain (same images/backbone), one could keep
+only rows where all 7 ranks kingdom..species are non-null. Measured on the real train split
+(200k random sample, seed 0, rank columns only — no image decode), 2026-06-08:
+
+- **complete-to-species = 5.99%** of train → projected **~105k rows** of 1,755,473. Workable
+  size (larger than BIOSCAN's 36k train_seen), BUT:
+- **only 100 distinct species / 77 genera** — a narrow, shallow tree (cf. BIOSCAN's thousands
+  of species). Heavy head: top species "delicatula" = 24% of complete rows in the sample; 12
+  singleton species.
+- The surviving rows are a **source-biased slice**: complete-to-species lives almost entirely
+  in the few sources that annotate that deep (whoi: species 11%; medplanktonset: species 39%).
+  So "complete planktonzilla" ≈ "the whoi + medplanktonset subset" — NOT representative of
+  planktonzilla's cross-source diversity.
+
+Implication: a complete-only filter is a valid **stability probe** (does curv collapse when
+lineages are complete, dataset held fixed?) but a poor **training set / unseen basis** — the
+100-class, 2-source space is degenerate, and holding out a *source* (our unseen definition)
+while keeping complete-only would gut the set. BIOSCAN already provides the complete-taxonomy
+control with a proper seen/unseen split, so the complete-planktonzilla probe is only worth
+running if a plankton-domain/backbone × raggedness interaction is specifically suspected.
+**Deferred for now (2026-06-08); stats recorded here.**
+
 ## Consequences for the construction
 
 - **CL anchors images to the deepest cumulative text**, which (per the table) is a broad
