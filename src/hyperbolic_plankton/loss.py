@@ -90,6 +90,34 @@ def hyperbolic_contrastive_loss_ddp(
     return 0.5 * (F.cross_entropy(img_logits, targets) + F.cross_entropy(text_logits, targets))
 
 
+def hyperbolic_angle_contrastive_loss_ddp(
+    img: torch.Tensor, text: torch.Tensor, curv: torch.Tensor | float, scale: torch.Tensor | float
+) -> torch.Tensor:
+    """Angle-based contrastive loss (ATMG, "Accept the Modality Gap"), cross-GPU negatives.
+
+    Logits are exterior angles instead of distances, so the loss is radius-free (does not
+    pin images to a fixed shell) and speaks the same geometric quantity (oxy_angle) as SEL.
+    Asymmetric apex convention (ATMG models.py): text is the apex (minimise angle at text),
+    image fans out (maximise angle at image) — i.e. the image is an instance of its deepest
+    text. Targets shifted by B*rank; falls back to the local square form off-DDP.
+    """
+    import torch.distributed as dist
+
+    B = img.shape[0]
+    if not (dist.is_available() and dist.is_initialized()) or dist.get_world_size() == 1:
+        all_img, all_text, rank = img, text, 0
+    else:
+        all_img = _gather_across_processes(img)
+        all_text = _gather_across_processes(text)
+        rank = dist.get_rank()
+
+    # angle at image (maximise for match) / angle at text (minimise for match)
+    img_logits = L.pairwise_oxy_angle(img, all_text, curv) * scale    # [B, B*world]
+    text_logits = -L.pairwise_oxy_angle(text, all_img, curv) * scale  # [B, B*world]
+    targets = torch.arange(B, device=img.device) + B * rank
+    return 0.5 * (F.cross_entropy(img_logits, targets) + F.cross_entropy(text_logits, targets))
+
+
 def entailment_pos(
     parent: torch.Tensor, child: torch.Tensor, curv: torch.Tensor | float, r_min: float = 0.1
 ) -> torch.Tensor:

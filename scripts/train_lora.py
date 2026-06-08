@@ -38,6 +38,7 @@ from hyperbolic_plankton.eval import (
 )
 from hyperbolic_plankton.loss import (
     _deepest_text,
+    hyperbolic_angle_contrastive_loss_ddp,
     hyperbolic_contrastive_loss_ddp,
     stacked_entailment_loss,
 )
@@ -134,7 +135,8 @@ def log(msg):
         print(msg, flush=True)
 
 
-def forward_loss(model, pixel_values, taxonomy_batch, lambda_sel, stats=None, indep_intra=False):
+def forward_loss(model, pixel_values, taxonomy_batch, lambda_sel, stats=None,
+                 indep_intra=False, contrastive="distance"):
     """contrastive(img, deepest_text) + lambda*SEL. `model` may be a DDP wrapper; geometry
     helpers live on the underlying module.
 
@@ -149,7 +151,9 @@ def forward_loss(model, pixel_values, taxonomy_batch, lambda_sel, stats=None, in
     # full-text-for-CL.
     cum_embs = core.encode_taxonomy(taxonomy_batch)
     deepest, _ = _deepest_text(cum_embs, RANKS)
-    cl = hyperbolic_contrastive_loss_ddp(img, deepest, curv, scale)
+    cl_fn = (hyperbolic_angle_contrastive_loss_ddp if contrastive == "angle"
+             else hyperbolic_contrastive_loss_ddp)
+    cl = cl_fn(img, deepest, curv, scale)
     # SEL (both intra AND inter) uses INDEPENDENT per-rank text `T_r` (paper Eq. 3 & 4):
     # distinct per-rank concepts give the radial-separation gradient SEL needs and avoid
     # the cumulative near-collinearity that drove curvature collapse.
@@ -182,6 +186,9 @@ def main():
                     help="LR multiplier for geometry scalars (curv, alphas); <1 slows them "
                          "so the hierarchy is learned via embeddings, not curvature collapse")
     ap.add_argument("--lambda-sel", type=float, default=1.0)
+    ap.add_argument("--contrastive", default="distance", choices=["distance", "angle"],
+                    help="distance=MERU InfoNCE on -pairwise_dist; angle=ATMG exterior-angle "
+                         "InfoNCE (radius-free, same oxy_angle quantity as SEL)")
     ap.add_argument("--independent-intra", action="store_true",
                     help="ABLATION: use independent per-rank text ('Rank: Value') for SEL "
                          "instead of cumulative lineage. Default is cumulative, which the "
@@ -327,6 +334,7 @@ def main():
                 loss, cl, sel = forward_loss(
                     ddp_model, pixel_values, taxonomy_batch, args.lambda_sel,
                     stats=step_stats, indep_intra=args.independent_intra,
+                    contrastive=args.contrastive,
                 )
                 loss = loss / args.accum
             scaler.scale(loss).backward()
