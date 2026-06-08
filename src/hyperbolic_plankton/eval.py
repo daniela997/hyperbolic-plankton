@@ -187,6 +187,7 @@ def run_unseen_eval(
     batch_size: int = 128,
     num_workers: int = 8,
     limit: int | None = None,
+    ranks: list[str] = RANKS,
 ) -> dict:
     """End-to-end Table-3-style unseen eval: encode prototypes, predict, score.
 
@@ -203,7 +204,7 @@ def run_unseen_eval(
     protos = encode_prototypes(model, classes, prompt=prompt)
     curv = model.curvature
 
-    collate = TaxonomyCollator(model.preprocess)
+    collate = TaxonomyCollator(model.preprocess, ranks=ranks)
     loader = DataLoader(
         unseen_ds, batch_size=batch_size, shuffle=False,
         num_workers=num_workers, collate_fn=collate,
@@ -222,7 +223,7 @@ def run_unseen_eval(
 
     pred_full = [classes[i] for i in pred_idx]
     return {
-        "metrics": taxonomic_macro_f1(true_full, pred_full),
+        "metrics": taxonomic_macro_f1(true_full, pred_full, ranks),
         "n": len(true_full),
         "n_classes": len(classes),
     }

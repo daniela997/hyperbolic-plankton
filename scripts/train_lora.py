@@ -29,6 +29,7 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader
 from torch.utils.data.distributed import DistributedSampler
 
+from hyperbolic_plankton.bioscan import BIOSCAN_RANKS, BioscanHDF5Dataset
 from hyperbolic_plankton.data import RANKS, HFTaxonomyDataset
 from hyperbolic_plankton.eval import (
     class_set_from_dataset,
@@ -84,7 +85,26 @@ def _build_eval_sets(cache, args):
     }
 
 
-def _run_periodic_eval(model, eval_sets, num_workers, indep_intra=False):
+BIOSCAN_HDF5 = "/scratch/daniela/bioscan1m/data/BIOSCAN_1M/split_data/BioScan_data_in_splits.hdf5"
+
+
+def _build_eval_sets_bioscan(args):
+    """BIOSCAN periodic eval from the CLIBD test_seen / test_unseen groups. Classes are the
+    `full` lineage strings present in each split (the species-complete class space)."""
+    seen_ds = BioscanHDF5Dataset(BIOSCAN_HDF5, "test_seen")
+    unseen_ds = BioscanHDF5Dataset(BIOSCAN_HDF5, "test_unseen")
+    seen_classes = sorted({seen_ds[i]["taxonomy"]["full"] for i in range(len(seen_ds))} - {"unknown"})
+    unseen_classes = sorted(
+        {unseen_ds[i]["taxonomy"]["full"] for i in range(len(unseen_ds))} - {"unknown"}
+    )
+    geom_items = [seen_ds[i] for i in range(min(512, len(seen_ds)))]
+    return {
+        "sets": {"seen": (seen_ds, seen_classes), "unseen": (unseen_ds, unseen_classes)},
+        "geom_items": geom_items,
+    }
+
+
+def _run_periodic_eval(model, eval_sets, num_workers, indep_intra=False, ranks=RANKS):
     """Eval seen-val + unseen subsamples + per-rank geometry; flat wandb-loggable dict.
 
     `indep_intra` must match training so the logged loss_terms reflect the SAME SEL the
@@ -96,13 +116,15 @@ def _run_periodic_eval(model, eval_sets, num_workers, indep_intra=False):
     model.eval()
     out = {}
     for name, (ds, classes) in eval_sets["sets"].items():
-        res = run_unseen_eval(model, ds, classes, num_workers=num_workers)
+        res = run_unseen_eval(model, ds, classes, num_workers=num_workers, ranks=ranks)
         out.update(flatten_metrics(res["metrics"], prefix=f"eval/{name}"))
         out[f"eval/{name}/n_classes"] = res["n_classes"]
 
     # geometry diagnostics + SEL term decomposition on the fixed batch
-    pixel_values, taxonomy_batch, _ = TaxonomyCollator(model.preprocess)(eval_sets["geom_items"])
-    out.update(geometry_stats(model, taxonomy_batch))
+    pixel_values, taxonomy_batch, _ = TaxonomyCollator(model.preprocess, ranks=ranks)(
+        eval_sets["geom_items"]
+    )
+    out.update(geometry_stats(model, taxonomy_batch, ranks=ranks))
 
     # per-term SEL (intra per edge + inter, pos/neg components) for understanding which
     # part of the loss is active — logged under loss_terms/*. Use the SAME text form as
@@ -113,7 +135,7 @@ def _run_periodic_eval(model, eval_sets, num_workers, indep_intra=False):
         sel_embs = model.encode_taxonomy(taxonomy_batch, indep=True) if indep_intra else cum_embs
         sel_stats: dict = {}
         _, intra, inter = stacked_entailment_loss(
-            img, cum_embs, taxonomy_batch, RANKS, model.curvature,
+            img, cum_embs, taxonomy_batch, ranks, model.curvature,
             stats=sel_stats, sel_text_embs=sel_embs,
         )
         out["loss_terms/sel_intra"] = float(intra)
@@ -136,7 +158,7 @@ def log(msg):
 
 
 def forward_loss(model, pixel_values, taxonomy_batch, lambda_sel, stats=None,
-                 indep_intra=False, contrastive="distance"):
+                 indep_intra=False, contrastive="distance", ranks=RANKS):
     """contrastive(img, deepest_text) + lambda*SEL. `model` may be a DDP wrapper; geometry
     helpers live on the underlying module.
 
@@ -150,7 +172,7 @@ def forward_loss(model, pixel_values, taxonomy_batch, lambda_sel, stats=None,
     # Contrastive: align image to its deepest CUMULATIVE (`full`) text — the paper's
     # full-text-for-CL.
     cum_embs = core.encode_taxonomy(taxonomy_batch)
-    deepest, _ = _deepest_text(cum_embs, RANKS)
+    deepest, _ = _deepest_text(cum_embs, ranks)
     cl_fn = (hyperbolic_angle_contrastive_loss_ddp if contrastive == "angle"
              else hyperbolic_contrastive_loss_ddp)
     cl = cl_fn(img, deepest, curv, scale)
@@ -159,7 +181,7 @@ def forward_loss(model, pixel_values, taxonomy_batch, lambda_sel, stats=None,
     # the cumulative near-collinearity that drove curvature collapse.
     sel_embs = core.encode_taxonomy(taxonomy_batch, indep=True) if indep_intra else cum_embs
     sel, intra, inter = stacked_entailment_loss(
-        img, cum_embs, taxonomy_batch, RANKS, curv, stats=stats, sel_text_embs=sel_embs
+        img, cum_embs, taxonomy_batch, ranks, curv, stats=stats, sel_text_embs=sel_embs
     )
     if stats is not None:
         stats["loss_terms/sel_intra"] = intra.detach().item()
@@ -169,6 +191,9 @@ def forward_loss(model, pixel_values, taxonomy_batch, lambda_sel, stats=None,
 
 def main():
     ap = argparse.ArgumentParser()
+    ap.add_argument("--dataset", default="planktonzilla", choices=["planktonzilla", "bioscan"],
+                    help="planktonzilla=ragged 7-rank (default); bioscan=complete 4-rank "
+                         "(order..species) CLIBD split, the clean recipe testbed")
     ap.add_argument("--backbone", default="bioclip", choices=["clip", "bioclip"])
     ap.add_argument("--iters", type=int, default=30000)
     ap.add_argument("--warmup", type=int, default=4000)
@@ -244,17 +269,21 @@ def main():
 
     # data: load the prebuilt Planktonzilla-faithful splits (scripts/build_splits.py).
     # Train on seen-TRAIN only; seen-val + unseen are held out for periodic eval.
-    log("loading cache + prebuilt split indices...")
-    cache = load_from_disk(CACHE)
-    train_idx = np.load(f"{SPLIT_DIR}/train_idx.npy")
-    train_ds = HFTaxonomyDataset(cache.select(train_idx.tolist()))
+    # ranks: planktonzilla = ragged 7-rank; bioscan = complete 4-rank (order..species).
+    log(f"loading {args.dataset} train split...")
+    if args.dataset == "bioscan":
+        ranks = BIOSCAN_RANKS
+        train_ds = BioscanHDF5Dataset(BIOSCAN_HDF5, "train_seen")
+        eval_sets = _build_eval_sets_bioscan(args) if is_main() else None
+    else:
+        ranks = RANKS
+        cache = load_from_disk(CACHE)
+        train_idx = np.load(f"{SPLIT_DIR}/train_idx.npy")
+        train_ds = HFTaxonomyDataset(cache.select(train_idx.tolist()))
+        eval_sets = _build_eval_sets(cache, args) if is_main() else None
     log(f"seen-train rows: {len(train_ds):,}")
 
-    # eval subsamples (fixed, seeded) built once on rank 0's view; every rank can build
-    # them but only rank 0 evaluates.
-    eval_sets = _build_eval_sets(cache, args) if is_main() else None
-
-    collate = TaxonomyCollator(model.preprocess)
+    collate = TaxonomyCollator(model.preprocess, ranks=ranks)
     sampler = DistributedSampler(train_ds, shuffle=True, seed=0) if ddp else None
     loader = DataLoader(
         train_ds, batch_size=args.micro_bs, sampler=sampler, shuffle=(sampler is None),
@@ -334,7 +363,7 @@ def main():
                 loss, cl, sel = forward_loss(
                     ddp_model, pixel_values, taxonomy_batch, args.lambda_sel,
                     stats=step_stats, indep_intra=args.independent_intra,
-                    contrastive=args.contrastive,
+                    contrastive=args.contrastive, ranks=ranks,
                 )
                 loss = loss / args.accum
             scaler.scale(loss).backward()
@@ -377,7 +406,8 @@ def main():
         if it % args.eval_every == 0:
             if is_main():
                 metrics = _run_periodic_eval(
-                    model, eval_sets, args.num_workers, indep_intra=args.independent_intra
+                    model, eval_sets, args.num_workers, indep_intra=args.independent_intra,
+                    ranks=ranks,
                 )
                 log(f"  [eval it {it}] "
                     f"unseen species_f1={metrics.get('eval/unseen/species_f1', 0):.4f} "

@@ -43,8 +43,11 @@ def _clean(v) -> str | None:
     return s
 
 
-def build_taxonomy(row: dict) -> dict:
+def build_taxonomy(row: dict, rank_columns: list[str] = _HF_RANK_COLUMNS) -> dict:
     """Build the per-rank taxonomy dict for one row (real ranks only).
+
+    `rank_columns` are the source column names in coarse->fine order (default: the 7
+    planktonzilla HF columns). BIOSCAN passes its 4 columns (Order..Species).
 
     Each rank carries TWO text forms:
       - `{rank}` = **cumulative** lineage through that rank (e.g. family =
@@ -67,7 +70,7 @@ def build_taxonomy(row: dict) -> dict:
     cumulative: list[str] = []
     valid_ranks: list[str] = []
 
-    for col in _HF_RANK_COLUMNS:
+    for col in rank_columns:
         val = _clean(row.get(col))
         key = col.lower()
         if val is not None:
