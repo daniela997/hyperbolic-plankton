@@ -54,27 +54,48 @@ SPLIT_DIR = "/scratch/daniela/hyperbolic_plankton_splits"
 WANDB_DIR = "/scratch/daniela/wandb"  # keep wandb's local files off the repo/home
 
 
+def _stratified_subsample(cache, idx, cap, seed):
+    """Class-balanced subset of `idx`: up to `cap` rows per `proposed_label`, sampled `seed`.
+
+    Stratify by `proposed_label` (the WoRMS-harmonised CLASS IDENTITY the eval scores), not
+    `full` — `full` conflates annotation depth with identity (two depths of the same species
+    get different `full` strings). ~equal samples per class gives the periodic MACRO-F1
+    (which weights classes equally) a low-variance estimate of the full macro-F1, unlike a
+    uniform subsample where rare classes are under-counted exactly where macro weights most.
+    Reads only the `proposed_label` column (no image decode)."""
+    labels = np.array(cache.select(idx.tolist())["proposed_label"], dtype=object)
+    rng = np.random.default_rng(seed)
+    keep = []
+    for cls in np.unique(labels):
+        rows = idx[labels == cls]
+        if len(rows) > cap:
+            rows = rng.choice(rows, size=cap, replace=False)
+        keep.append(rows)
+    out = np.concatenate(keep)
+    rng.shuffle(out)
+    return out
+
+
 def _build_eval_sets(cache, args):
     """Fixed, seeded subsamples of seen-val and unseen for periodic eval (rank 0 only).
 
     Returns {seen: (ds, classes), unseen: (ds, classes)}. BOTH predict among their FULL
     frozen class set (seen_classes.json / unseen_classes.json) — the subsample only reduces
-    the number of *images* scored (a time-saver), NOT the candidate class space. This keeps
-    the periodic number an unbiased estimate of the full-test number (cf. Planktonzilla,
-    which evaluates against the full `features['label'].names`). Final paper numbers come
-    from scripts/final_eval.py over the full splits.
-    """
-    rng = np.random.default_rng(0)
+    the number of *images* scored (a time-saver), NOT the candidate class space.
 
+    Subsampling is STRATIFIED (`--eval-cap` rows per `proposed_label`), not uniform, so the
+    periodic macro-F1 tracks the full-split macro-F1 with low variance. Final paper numbers
+    come from scripts/final_eval.py over the full splits.
+    """
     with open(f"{SPLIT_DIR}/seen_classes.json") as f:
         seen_classes = json.load(f)
     val_idx = np.load(f"{SPLIT_DIR}/val_idx.npy")
-    sel = rng.choice(val_idx, size=min(args.eval_n, len(val_idx)), replace=False)
+    sel = _stratified_subsample(cache, val_idx, args.eval_cap, seed=0)
     seen_val = cache.select(sorted(sel.tolist()))
     seen_ds = HFTaxonomyDataset(seen_val)
 
     unseen_idx = np.load(f"{SPLIT_DIR}/unseen_idx.npy")
-    sel = rng.choice(unseen_idx, size=min(args.eval_n, len(unseen_idx)), replace=False)
+    sel = _stratified_subsample(cache, unseen_idx, args.eval_cap, seed=0)
     unseen_sub = cache.select(sorted(sel.tolist()))
     unseen_ds = HFTaxonomyDataset(unseen_sub)
     with open(f"{SPLIT_DIR}/unseen_classes.json") as f:
@@ -269,7 +290,9 @@ def main():
     ap.add_argument("--ckpt-every", type=int, default=2000)
     ap.add_argument("--log-every", type=int, default=50)
     ap.add_argument("--eval-every", type=int, default=1000)
-    ap.add_argument("--eval-n", type=int, default=10000, help="subsample size per eval set")
+    ap.add_argument("--eval-cap", type=int, default=50,
+                    help="periodic eval: max rows per proposed_label class (stratified "
+                         "subsample, so macro-F1 tracks the full-split value with low variance)")
     ap.add_argument("--tag", default="bioclip_lora")
     ap.add_argument("--wandb-project", default="hyperbolic-plankton")
     ap.add_argument("--no-wandb", action="store_true")
