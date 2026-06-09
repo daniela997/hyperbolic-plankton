@@ -184,3 +184,88 @@ trained model, plot the distribution of `oxy_angle` vs `half_aperture` over the 
 pairs. If the hump is driven by large `oxy_angle` → children genuinely diverge in direction;
 if by small `half_aperture` → parent cone too tight. That decomposes the hinge and pins the
 cause empirically rather than by hypothesis.
+
+## Per-term map: what raggedness does to each loss (2026-06-09)
+
+Walking through every loss term on three REAL train lineages of different depths, marking
+what is correct-by-design vs an actual bug. Anchors:
+
+- **DEEP** (7): `chromista ciliophora heterotrichea heterotrichida spirostomidae spirostomum ambiguum`
+- **MID** (5): `animalia arthropoda copepoda calanoida acartiidae`
+- **SHALLOW** (2): `bacteria cyanobacteria`
+
+### CL (image ↔ deepest cumulative `full` text)
+Each image anchors to a DIFFERENT-depth node (DEEP→species far out, MID→family mid,
+SHALLOW→phylum near origin). The positive target is each sample's own depth.
+
+- ✓ **Varying-depth anchor is CORRECT, not a problem.** A common confusion: "distance-CL
+  wants all copepod images at one radius." It does not — a family-deep and a species-deep
+  copepod are **different `full` strings = different classes**, each with its own positive
+  target at its own depth. There is no single "copepoda class" spanning depths. (Earlier
+  framing of a separate "varying-radius" problem was wrong and is retracted.)
+- ✗ **Ancestor false-negative (the real, ragged-specific CL bug).** In-batch negatives
+  ignore lineage. A SHALLOW lineage that is a strict PREFIX of a DEEP one in the same batch
+  is a true relative, yet CL repels them. Measured: **82 distinct ancestor lineage-pairs in
+  one B=128 batch.** Real examples:
+  - `animalia arthropoda copepoda` (family-deep image) repelled from
+    `animalia arthropoda copepoda cyclopoida oncaeidae oncaea` — the shallow image *is* a
+    copepod; the deep text *is* a copepod.
+  - `bacteria cyanobacteria` repelled from
+    `bacteria cyanobacteria cyanophyceae oscillatoriales microcoleaceae trichodesmium`.
+  - `animalia chordata appendicularia` repelled from its own descendants
+    `...copelata fritillariidae` and `...copelata oikopleuridae`.
+  **`--cl-mask same` does NOT catch these** — they are different strings, not identical.
+  This bug is RAGGED-SPECIFIC: in complete BIOSCAN every lineage is depth-7, so a shallow
+  ancestor never appears as a standalone sample → no in-batch ancestor pairs. Would need an
+  ancestor/prefix-aware mask to address.
+
+### SEL-intra (consecutive ranks, `T_r`)
+Edge count varies by sample: DEEP supplies all 6 edges, MID supplies 4 (stops at family),
+SHALLOW supplies 1 (kingdom→phylum).
+
+- ✓ **Per-sample correct.** A sample only entails edges it has; `_valid` masking adds no
+  phantom edges. You cannot entail genus→species for a family-deep sample.
+- ⚠️ **Dataset-level deep-edge STARVATION (real, unquantified open issue).** Aggregate edge
+  supervision is wildly uneven with depth: kingdom→phylum sees ~100% of samples;
+  **genus→species sees only ~6%** (the species-complete fraction). So the deep cones are
+  shaped by a fraction of the data the shallow cones get. `sel_intra` normalises each
+  *sample's* loss by *its* #edges — this does NOT fix the cross-sample imbalance (deep edges
+  still accumulate far fewer gradient contributions overall).
+- ⚠️ **Why cumulative text may help raggedness here specifically.** With INDEPENDENT `T_r`,
+  each deep edge ("Genus: X" ⊂ "Family: Y") is data-starved in isolation. With CUMULATIVE,
+  the deep edge's text ("...family genus" ⊂ "...family") SHARES A PREFIX with the
+  well-supervised shallow part, so prefix-sharing transfers shallow supervision down to the
+  starved deep edges. This is a concrete, ragged-specific reason cumulative could beat
+  independent — testable: if cumulative (C1/C2) beats independent (B0) specifically at the
+  DEEP ranks, this is the mechanism. (Worth a per-rank readout.)
+
+### SEL-inter (image ↔ deepest text `T_R'`)
+Image entailed by its deepest node: DEEP→tight species cone, MID→wide family cone,
+SHALLOW→huge phylum cone.
+
+- ✓ **Correct by design — raggedness handled gracefully.** Image localisation scales with
+  annotation depth: deep image tightly placed, shallow image loosely placed in a wide cone.
+  This IS the uncertainty encoding. The barely-constrained shallow image contributes little
+  gradient — appropriate (we know almost nothing about where it goes). No fix needed.
+
+### Prediction / eval (image → nearest prototype, per-rank truncation)
+- ✓ **Correct, verified.** Per-rank truncation scores a sample only at ranks it has; a
+  family-deep image is not penalised for "wrong species" (it has none).
+
+### Synthesis — what's open vs settled
+
+| issue | status |
+|---|---|
+| SEL-inter wide shallow cones | ✓ correct by design |
+| eval truncation for ragged depths | ✓ correct, verified |
+| CL varying-depth positive anchor | ✓ correct (was wrongly flagged as a problem; retracted) |
+| CL same-class false-neg | ✗ bug, fixed by `--cl-mask same` (A1) |
+| **CL ancestor false-neg** | ✗ bug, RAGGED-SPECIFIC, **not yet addressed** (82/batch; needs ancestor-aware mask) |
+| **SEL-intra deep-edge starvation** | ⚠️ real, unquantified; cumulative text *may* mitigate via prefix-sharing (C1/C2) |
+
+**The unifying observation:** raggedness creates a **depth gradient in supervision density**
+— shallow ranks are data-rich, deep ranks data-poor. The two open problems are both
+symptoms: SEL-intra starves the deep edges; CL mistreats the shallow-ancestor / deep-
+descendant pairs that *only exist because* depths vary. The **cumulative text form** is
+interesting precisely because prefix-sharing is a natural channel to move information from
+the data-rich shallow ranks to the data-poor deep ones.
