@@ -193,9 +193,12 @@ def log(msg):
 
 def forward_loss(model, pixel_values, taxonomy_batch, lambda_sel, stats=None,
                  sel_indep=True, contrastive="distance", ranks=RANKS,
-                 sel_tau=1.0, sel_leak=0.0, sel_uncertainty=0.0, cl_mask="none"):
-    """contrastive(img, deepest_text) + lambda*SEL. `model` may be a DDP wrapper; geometry
-    helpers live on the underlying module.
+                 sel_tau=1.0, sel_leak=0.0, sel_uncertainty=0.0, cl_mask="none", lambda_cl=1.0):
+    """lambda_cl*contrastive(img, deepest_text) + lambda_sel*SEL. `model` may be a DDP
+    wrapper; geometry helpers live on the underlying module.
+
+    Set lambda_cl=0 for SEL-only, lambda_sel=0 for CL-only (the unused branch still runs for
+    logging but contributes no gradient).
 
     If `stats` (a dict) is given, the SEL per-edge pos/neg decomposition is collected into
     it (cheap float reads) for per-step logging alongside cl/sel.
@@ -229,7 +232,7 @@ def forward_loss(model, pixel_values, taxonomy_batch, lambda_sel, stats=None,
     if stats is not None:
         stats["loss_terms/sel_intra"] = intra.detach().item()
         stats["loss_terms/sel_inter"] = inter.detach().item()
-    return cl + lambda_sel * sel, cl.detach(), sel.detach()
+    return lambda_cl * cl + lambda_sel * sel, cl.detach(), sel.detach()
 
 
 def main():
@@ -259,6 +262,9 @@ def main():
                     help="LR multiplier for geometry scalars (curv, alphas); <1 slows them "
                          "so the hierarchy is learned via embeddings, not curvature collapse")
     ap.add_argument("--lambda-sel", type=float, default=1.0)
+    ap.add_argument("--lambda-cl", type=float, default=1.0,
+                    help="weight on the contrastive term. 0 = SEL-only (paper's strongest "
+                         "unseen rows); --lambda-sel 0 = CL-only")
     ap.add_argument("--contrastive", default="distance", choices=["distance", "angle"],
                     help="distance=MERU InfoNCE on -pairwise_dist; angle=ATMG exterior-angle "
                          "InfoNCE (radius-free, same oxy_angle quantity as SEL)")
@@ -443,6 +449,7 @@ def main():
                     contrastive=args.contrastive, ranks=ranks,
                     sel_tau=args.sel_tau, sel_leak=args.sel_leak,
                     sel_uncertainty=args.sel_uncertainty, cl_mask=args.cl_mask,
+                    lambda_cl=args.lambda_cl,
                 )
                 loss = loss / args.accum
             scaler.scale(loss).backward()
