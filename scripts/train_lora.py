@@ -32,13 +32,13 @@ from torch.utils.data.distributed import DistributedSampler
 from hyperbolic_plankton.bioscan import BIOSCAN_RANKS, BioscanHDF5Dataset
 from hyperbolic_plankton.data import RANKS, HFTaxonomyDataset
 from hyperbolic_plankton.eval import (
-    class_set_from_dataset,
     flatten_metrics,
     geometry_stats,
     run_unseen_eval,
 )
 from hyperbolic_plankton.loss import (
     _deepest_text,
+    _dense_ids,
     hyperbolic_angle_contrastive_loss_ddp,
     hyperbolic_contrastive_loss_ddp,
     stacked_entailment_loss,
@@ -57,15 +57,20 @@ WANDB_DIR = "/scratch/daniela/wandb"  # keep wandb's local files off the repo/ho
 def _build_eval_sets(cache, args):
     """Fixed, seeded subsamples of seen-val and unseen for periodic eval (rank 0 only).
 
-    Returns {seen: (ds, classes), unseen: (ds, classes)}. seen-val predicts among the
-    classes present in the seen-val subsample; unseen uses the prebuilt 220-class set.
+    Returns {seen: (ds, classes), unseen: (ds, classes)}. BOTH predict among their FULL
+    frozen class set (seen_classes.json / unseen_classes.json) — the subsample only reduces
+    the number of *images* scored (a time-saver), NOT the candidate class space. This keeps
+    the periodic number an unbiased estimate of the full-test number (cf. Planktonzilla,
+    which evaluates against the full `features['label'].names`). Final paper numbers come
+    from scripts/final_eval.py over the full splits.
     """
     rng = np.random.default_rng(0)
 
+    with open(f"{SPLIT_DIR}/seen_classes.json") as f:
+        seen_classes = json.load(f)
     val_idx = np.load(f"{SPLIT_DIR}/val_idx.npy")
     sel = rng.choice(val_idx, size=min(args.eval_n, len(val_idx)), replace=False)
     seen_val = cache.select(sorted(sel.tolist()))
-    seen_classes = class_set_from_dataset(seen_val)
     seen_ds = HFTaxonomyDataset(seen_val)
 
     unseen_idx = np.load(f"{SPLIT_DIR}/unseen_idx.npy")
@@ -88,15 +93,23 @@ def _build_eval_sets(cache, args):
 BIOSCAN_HDF5 = "/scratch/daniela/bioscan1m/data/BIOSCAN_1M/split_data/BioScan_data_in_splits.hdf5"
 
 
+def _bioscan_classes(group: str) -> list[str]:
+    """Distinct `full` lineage strings in a BIOSCAN HDF5 group (the candidate class set)."""
+    ds = BioscanHDF5Dataset(BIOSCAN_HDF5, group)
+    return sorted({ds[i]["taxonomy"]["full"] for i in range(len(ds))} - {"unknown"})
+
+
 def _build_eval_sets_bioscan(args):
-    """BIOSCAN periodic eval from the CLIBD test_seen / test_unseen groups. Classes are the
-    `full` lineage strings present in each split (the species-complete class space)."""
+    """BIOSCAN periodic eval from the CLIBD test_seen / test_unseen groups.
+
+    Candidate classes = classes PRESENT in each full test group (Planktonzilla CLIP protocol:
+    `unique` over the eval texts, taken over the FULL group so it is unbiased). The periodic
+    monitor scores an image subsample against this full class set.
+    """
     seen_ds = BioscanHDF5Dataset(BIOSCAN_HDF5, "test_seen")
     unseen_ds = BioscanHDF5Dataset(BIOSCAN_HDF5, "test_unseen")
-    seen_classes = sorted({seen_ds[i]["taxonomy"]["full"] for i in range(len(seen_ds))} - {"unknown"})
-    unseen_classes = sorted(
-        {unseen_ds[i]["taxonomy"]["full"] for i in range(len(unseen_ds))} - {"unknown"}
-    )
+    seen_classes = _bioscan_classes("test_seen")
+    unseen_classes = _bioscan_classes("test_unseen")
     geom_items = [seen_ds[i] for i in range(min(512, len(seen_ds)))]
     return {
         "sets": {"seen": (seen_ds, seen_classes), "unseen": (unseen_ds, unseen_classes)},
@@ -159,7 +172,7 @@ def log(msg):
 
 def forward_loss(model, pixel_values, taxonomy_batch, lambda_sel, stats=None,
                  indep_intra=False, contrastive="distance", ranks=RANKS,
-                 sel_tau=1.0, sel_leak=0.0, sel_uncertainty=0.0):
+                 sel_tau=1.0, sel_leak=0.0, sel_uncertainty=0.0, cl_mask="none"):
     """contrastive(img, deepest_text) + lambda*SEL. `model` may be a DDP wrapper; geometry
     helpers live on the underlying module.
 
@@ -174,9 +187,15 @@ def forward_loss(model, pixel_values, taxonomy_batch, lambda_sel, stats=None,
     # full-text-for-CL.
     cum_embs = core.encode_taxonomy(taxonomy_batch)
     deepest, _ = _deepest_text(cum_embs, ranks)
+    # cl_mask: suppress same-class off-diagonal negatives (true positives mis-treated as
+    # negatives — ~4.4% of pairs in clade-imbalanced plankton batches). class id = dense id
+    # of the deepest cumulative `full` lineage string.
+    class_ids = None
+    if cl_mask == "same":
+        class_ids = _dense_ids(taxonomy_batch["full"], img.device)
     cl_fn = (hyperbolic_angle_contrastive_loss_ddp if contrastive == "angle"
              else hyperbolic_contrastive_loss_ddp)
-    cl = cl_fn(img, deepest, curv, scale)
+    cl = cl_fn(img, deepest, curv, scale, class_ids=class_ids)
     # SEL (both intra AND inter) uses INDEPENDENT per-rank text `T_r` (paper Eq. 3 & 4):
     # distinct per-rank concepts give the radial-separation gradient SEL needs and avoid
     # the cumulative near-collinearity that drove curvature collapse.
@@ -216,6 +235,10 @@ def main():
     ap.add_argument("--contrastive", default="distance", choices=["distance", "angle"],
                     help="distance=MERU InfoNCE on -pairwise_dist; angle=ATMG exterior-angle "
                          "InfoNCE (radius-free, same oxy_angle quantity as SEL)")
+    ap.add_argument("--cl-mask", default="none", choices=["none", "same"],
+                    help="mask same-class off-diagonal CL negatives (true positives "
+                         "mis-treated as negatives, ~4.4%% of plankton batch pairs). "
+                         "none=standard InfoNCE")
     # SEL-intra anti-collapse terms (UNCHA-inspired). Defaults reproduce the plain hinge.
     ap.add_argument("--sel-leak", type=float, default=0.0,
                     help="Leaky-entailment factor: always-on `leak*oxy_angle` keeps pulling "
@@ -379,7 +402,7 @@ def main():
                     stats=step_stats, indep_intra=args.independent_intra,
                     contrastive=args.contrastive, ranks=ranks,
                     sel_tau=args.sel_tau, sel_leak=args.sel_leak,
-                    sel_uncertainty=args.sel_uncertainty,
+                    sel_uncertainty=args.sel_uncertainty, cl_mask=args.cl_mask,
                 )
                 loss = loss / args.accum
             scaler.scale(loss).backward()

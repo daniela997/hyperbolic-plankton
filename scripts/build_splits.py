@@ -73,6 +73,18 @@ def main():
         np.save(f"{SPLIT_DIR}/{name}_idx.npy", idx)
         print(f"  saved {name}_idx.npy  ({len(idx):,})")
 
+    # ---- SEEN class set = `full` lineages present in the seen-VAL split ----
+    # Matches Planktonzilla's CLIP eval protocol (`torch.unique` over the eval texts),
+    # computed over the FULL val split so it is unbiased — the periodic monitor scores an
+    # IMAGE subsample against THIS full class set (the bias only arises if `unique` is taken
+    # over a subsample). Final eval (scripts/final_eval.py) recomputes present-classes over
+    # the full test split directly.
+    val_fulls = fulls[np.array(va["_cache_idx"])]
+    seen_classes = sorted({f for f in val_fulls.tolist() if f != "unknown"})
+    print(f"seen classes (present in val): {len(seen_classes)}")
+    with open(f"{SPLIT_DIR}/seen_classes.json", "w") as f:
+        json.dump(seen_classes, f)
+
     print(f"DONE -> {SPLIT_DIR}")
 
 
