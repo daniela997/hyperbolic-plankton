@@ -56,11 +56,13 @@ def lorentz_to_poincare(space: torch.Tensor, curv: float) -> torch.Tensor:
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--ckpt", required=True)
+    ap.add_argument("--dataset", default="planktonzilla", choices=["planktonzilla", "bioscan"])
     ap.add_argument("--backbone", default="bioclip", choices=["clip", "bioclip"])
     ap.add_argument("--lora", action="store_true", help="ckpt was trained with LoRA")
     ap.add_argument("--lora-r", type=int, default=128)
     ap.add_argument("--n", type=int, default=400, help="#samples (images) to plot")
     ap.add_argument("--out", default="/scratch/daniela/horopca.png")
+    ap.add_argument("--sel-text", default="independent", choices=["independent", "cumulative"])
     args = ap.parse_args()
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -73,21 +75,31 @@ def main():
     curv = model.curvature.item()
     print(f"loaded {args.ckpt}  curv={curv:.4f}")
 
-    # sample seen-val rows
-    cache = load_from_disk(CACHE)
-    val_idx = np.load(f"{SPLIT_DIR}/val_idx.npy")
-    sel = np.random.default_rng(0).choice(val_idx, size=args.n, replace=False)
-    ds = HFTaxonomyDataset(cache.select(sorted(sel.tolist())))
-    items = [ds[i] for i in range(len(ds))]
-    pix, tax, _ = TaxonomyCollator(model.preprocess)(items)
+    # sample seen-val rows (planktonzilla) or test_seen rows (bioscan)
+    if args.dataset == "bioscan":
+        from hyperbolic_plankton.bioscan import BIOSCAN_RANKS, BioscanHDF5Dataset
 
-    # encode: images + each rank's text (cumulative), all on the hyperboloid.
+        ranks = BIOSCAN_RANKS
+        BIOSCAN_HDF5 = "/scratch/daniela/bioscan1m/data/BIOSCAN_1M/split_data/BioScan_data_in_splits.hdf5"
+        full = BioscanHDF5Dataset(BIOSCAN_HDF5, "test_seen")
+        sel = np.random.default_rng(0).choice(len(full), size=args.n, replace=False)
+        items = [full[int(i)] for i in sel]
+    else:
+        ranks = RANKS
+        cache = load_from_disk(CACHE)
+        val_idx = np.load(f"{SPLIT_DIR}/val_idx.npy")
+        sel = np.random.default_rng(0).choice(val_idx, size=args.n, replace=False)
+        ds = HFTaxonomyDataset(cache.select(sorted(sel.tolist())))
+        items = [ds[i] for i in range(len(ds))]
+    pix, tax, _ = TaxonomyCollator(model.preprocess, ranks=ranks)(items)
+
+    # encode: images + each rank's text (cumulative/independent), all on the hyperboloid.
     # no_grad here only — HoroPCA.fit below needs autograd for its projection optimisation.
     with torch.no_grad():
         img = model.encode_image(pix.to(device))                   # [N, D]
-        txt = model.encode_taxonomy(tax)                           # {rank: [N,D], rank_valid}
+        txt = model.encode_taxonomy(tax, indep=(args.sel_text == "independent"))                           # {rank: [N,D], rank_valid}
         pts, labels = [lorentz_to_poincare(img, curv)], ["image"] * img.shape[0]
-        for r in RANKS:
+        for r in ranks:
             valid = txt[f"{r}_valid"]
             if valid.any():
                 pts.append(lorentz_to_poincare(txt[r][valid], curv))
@@ -113,13 +125,13 @@ def main():
     hp.fit(Pc, iterative=False, optim=True)
     emb2d = hp.map_to_ball(Pc).detach().cpu().numpy()
 
-    _plot(emb2d, labels, args.out, curv)
+    _plot(emb2d, labels, args.out, curv, ranks)
 
 
-def _plot(emb2d, labels, out, curv):
+def _plot(emb2d, labels, out, curv, ranks):
     import matplotlib.pyplot as plt
 
-    order = ["image"] + RANKS
+    order = ["image"] + ranks
     colors = {  # rank -> color (coarse->fine = dark->bright), images grey
         "image": "0.6", "kingdom": "#440154", "phylum": "#414487", "class": "#2a788e",
         "order": "#22a884", "family": "#7ad151", "genus": "#fde725", "species": "#d62728",
