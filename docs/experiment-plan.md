@@ -49,20 +49,31 @@ Everything is measured as a delta from this. It is the **faithful Taxonomies-pap
 recipe** (the one that trained stably), with all new machinery OFF:
 
 ```
---backbone bioclip
+--backbone clip                    # OpenAI CLIP ViT-B/16 (the "CLIP-style" reference)
+--epochs 50                        # paper: 50 full passes (drives total_steps from dataset size)
 --optimizer adam --scheduler onecycle --lr 5e-5 --wd 1e-4
 --micro-bs 128 --accum 3            # eff. batch 768 across 2 GPUs
 --lambda-sel 1.0                    # L = CL + SEL (paper writes equal weight)
 --contrastive distance             # MERU-style InfoNCE (the standard)
 --cl-mask none                     # no false-negative masking
+--sel-text independent             # paper: SEL (intra Eq.3 + inter Eq.4) uses per-rank T_r;
+                                   #   CL always uses the cumulative `full` string
 --sel-tau 1.0 --sel-leak 0.0 --sel-uncertainty 0.0   # plain hinge SEL, no UNCHA terms
 # NO --curv-lr-scale               # free curvature
 --lora-r 128                       # HAC LoRA recipe (LoRA on by default; --no-lora to disable)
 ```
 
-Per-dataset:
-- BIOSCAN: `--dataset bioscan --iters 2400 --warmup 240 --eval-every 200` (~50 epochs).
-- Planktonzilla: `--dataset planktonzilla --iters 30000 --warmup 4000 --eval-every 1000`.
+Length is **epochs**, not a fixed iter count (a fixed `--iters` silently means very
+different #epochs across datasets). 50 epochs = `50 * (len(loader)//accum)` steps:
+- BIOSCAN (36k): ~2,360 steps.
+- Planktonzilla (1.76M): **~114,000 steps** — a long run. Consider fewer epochs for the
+  first pass if iteration speed matters; record whatever is used.
+
+Per-dataset: `--dataset {bioscan,planktonzilla}`, `--eval-every` 200 (bioscan) / 1000 (pz).
+
+> **SEL text form is also an ablation axis** (A6): `--sel-text cumulative` vs the
+> independent default — the paper uses independent, but our frozen+projector regime may
+> differ. Baseline uses the paper-faithful `independent`.
 
 **Baseline is run ONCE per dataset and frozen as the reference.** Its `final_eval.py`
 numbers are the bar every ablation must beat (or be measured against).
@@ -83,7 +94,8 @@ entail_ok).
 | **A2** | `--contrastive angle` | distance-CL shrinks curvature + distorts hierarchy (ATMG); angle-CL is radius-free, SEL-aligned | curv stops gliding OR unseen ↑; watch seen doesn't crater |
 | **A3** | `--sel-leak 0.1 --sel-tau 0.7` | leaky+tighter cones un-saturate apertures, spread upper ranks | order/family aperture < π/2; radii more stratified; entail_ok meaningful (not trivially 1.0) |
 | **A4** | `--sel-uncertainty 0.5` | radius=uncertainty penalty pushes parents out → ranks deeper, ragged leaves depth-appropriate | upper-rank radii spread; no seen regression |
-| **A5** | best-of(A1–A4) combined | the winning terms compose | beats B0 on unseen; geometry clean |
+| **A6** | `--sel-text cumulative` | does the paper's independent-T_r choice actually help us, or does cumulative (shared-prefix tree) work better in the frozen+projector regime? | compare unseen F1 + geometry vs B0 (independent) |
+| **A5** | best-of(A1–A4,A6) combined | the winning terms compose | beats B0 on unseen; geometry clean |
 
 Notes:
 - **Do NOT combine until each is attributed.** A5 only after A1–A4 each measured alone.

@@ -138,10 +138,10 @@ def _build_eval_sets_bioscan(args):
     }
 
 
-def _run_periodic_eval(model, eval_sets, num_workers, indep_intra=False, ranks=RANKS):
+def _run_periodic_eval(model, eval_sets, num_workers, sel_indep=True, ranks=RANKS):
     """Eval seen-val + unseen subsamples + per-rank geometry; flat wandb-loggable dict.
 
-    `indep_intra` must match training so the logged loss_terms reflect the SAME SEL the
+    `sel_indep` must match training so the logged loss_terms reflect the SAME SEL the
     optimiser sees (independent per-rank text iff training uses it; cumulative otherwise).
     """
     from hyperbolic_plankton.train import TaxonomyCollator
@@ -162,11 +162,11 @@ def _run_periodic_eval(model, eval_sets, num_workers, indep_intra=False, ranks=R
 
     # per-term SEL (intra per edge + inter, pos/neg components) for understanding which
     # part of the loss is active — logged under loss_terms/*. Use the SAME text form as
-    # training (cumulative by default; independent only under the ablation flag).
+    # training (independent per-rank by default; cumulative under the ablation).
     with torch.no_grad():
         img = model.encode_image(pixel_values.to(model.device))
         cum_embs = model.encode_taxonomy(taxonomy_batch)
-        sel_embs = model.encode_taxonomy(taxonomy_batch, indep=True) if indep_intra else cum_embs
+        sel_embs = model.encode_taxonomy(taxonomy_batch, indep=True) if sel_indep else cum_embs
         sel_stats: dict = {}
         _, intra, inter = stacked_entailment_loss(
             img, cum_embs, taxonomy_batch, ranks, model.curvature,
@@ -192,7 +192,7 @@ def log(msg):
 
 
 def forward_loss(model, pixel_values, taxonomy_batch, lambda_sel, stats=None,
-                 indep_intra=False, contrastive="distance", ranks=RANKS,
+                 sel_indep=True, contrastive="distance", ranks=RANKS,
                  sel_tau=1.0, sel_leak=0.0, sel_uncertainty=0.0, cl_mask="none"):
     """contrastive(img, deepest_text) + lambda*SEL. `model` may be a DDP wrapper; geometry
     helpers live on the underlying module.
@@ -217,10 +217,11 @@ def forward_loss(model, pixel_values, taxonomy_batch, lambda_sel, stats=None,
     cl_fn = (hyperbolic_angle_contrastive_loss_ddp if contrastive == "angle"
              else hyperbolic_contrastive_loss_ddp)
     cl = cl_fn(img, deepest, curv, scale, class_ids=class_ids)
-    # SEL (both intra AND inter) uses INDEPENDENT per-rank text `T_r` (paper Eq. 3 & 4):
-    # distinct per-rank concepts give the radial-separation gradient SEL needs and avoid
-    # the cumulative near-collinearity that drove curvature collapse.
-    sel_embs = core.encode_taxonomy(taxonomy_batch, indep=True) if indep_intra else cum_embs
+    # SEL — both intra (Eq.3) and inter (Eq.4) use the SAME text form. Paper-faithful is
+    # INDEPENDENT per-rank `T_r` ('Rank: Value'): distinct per-rank concepts give SEL the
+    # radial-separation gradient it needs (cumulative ranks are near-collinear). `cumulative`
+    # is the ablation. CL above always uses the cumulative `full` string regardless.
+    sel_embs = core.encode_taxonomy(taxonomy_batch, indep=True) if sel_indep else cum_embs
     sel, intra, inter = stacked_entailment_loss(
         img, cum_embs, taxonomy_batch, ranks, curv, stats=stats, sel_text_embs=sel_embs,
         tau=sel_tau, leak=sel_leak, lam_u=sel_uncertainty,
@@ -236,9 +237,14 @@ def main():
     ap.add_argument("--dataset", default="planktonzilla", choices=["planktonzilla", "bioscan"],
                     help="planktonzilla=ragged 7-rank (default); bioscan=complete 4-rank "
                          "(order..species) CLIBD split, the clean recipe testbed")
-    ap.add_argument("--backbone", default="bioclip", choices=["clip", "bioclip"])
-    ap.add_argument("--iters", type=int, default=30000)
-    ap.add_argument("--warmup", type=int, default=4000)
+    ap.add_argument("--backbone", default="clip", choices=["clip", "bioclip"])
+    ap.add_argument("--epochs", type=float, default=50,
+                    help="full passes over the train set (Taxonomy paper: 50). Drives "
+                         "total_steps = epochs * (len(loader)//accum). Primary length control.")
+    ap.add_argument("--iters", type=int, default=None,
+                    help="override total optimizer steps (debug); if set, ignores --epochs")
+    ap.add_argument("--warmup-frac", type=float, default=0.1,
+                    help="warmup as a fraction of total steps (paper warms up proportionally)")
     ap.add_argument("--micro-bs", type=int, default=128)
     ap.add_argument("--accum", type=int, default=3)
     ap.add_argument("--lr", type=float, default=2.5e-4)
@@ -272,10 +278,11 @@ def main():
                     help="Radius/uncertainty penalty weight: `lam_u*softplus(-||parent||)` "
                          "pushes parents off the origin so children end up deeper, and gives "
                          "ragged leaves depth-appropriate radius (UNCHA Eq.7/15). 0=off")
-    ap.add_argument("--independent-intra", action="store_true",
-                    help="ABLATION: use independent per-rank text ('Rank: Value') for SEL "
-                         "instead of cumulative lineage. Default is cumulative, which the "
-                         "scratchpad showed performs better in the frozen+projector regime.")
+    ap.add_argument("--sel-text", default="independent", choices=["independent", "cumulative"],
+                    help="text form for BOTH SEL terms (intra Eq.3 + inter Eq.4). Paper uses "
+                         "independent per-rank embeddings T_r ('Rank: Value') for SEL and the "
+                         "cumulative/full string ONLY for CL — so 'independent' is paper-"
+                         "faithful (default). 'cumulative' is the ablation. CL always uses full.")
     ap.add_argument("--freeze-curv", action="store_true",
                     help="hold curvature fixed at init (removes the curvature-collapse "
                          "shortcut so SEL must update embeddings, not shrink cones)")
@@ -310,7 +317,7 @@ def main():
         world = 1
     eff_batch = args.micro_bs * world * args.accum
     log(f"backbone={args.backbone} world={world} micro_bs={args.micro_bs} "
-        f"accum={args.accum} -> effective batch={eff_batch}  iters={args.iters}")
+        f"accum={args.accum} -> effective batch={eff_batch}")
 
     # model (+ LoRA unless --no-lora, which gives the scratchpad's projector-only regime:
     # frozen backbone under no_grad, only projector + MERU scalars trainable).
@@ -351,6 +358,16 @@ def main():
         pin_memory=True, persistent_workers=True,
     )
 
+    # Length in OPTIMIZER STEPS: --epochs (default, paper-faithful) -> epochs * steps/epoch,
+    # where one step = `accum` micro-batches. --iters overrides for debug. Computed here so
+    # it scales correctly with dataset size and batch (a fixed --iters silently means very
+    # different #epochs on BIOSCAN 36k vs planktonzilla 1.76M).
+    steps_per_epoch = max(1, len(loader) // args.accum)
+    total_iters = args.iters if args.iters is not None else int(args.epochs * steps_per_epoch)
+    warmup_steps = max(1, int(args.warmup_frac * total_iters))
+    log(f"steps/epoch={steps_per_epoch}  epochs={args.epochs}  total_steps={total_iters}  "
+        f"warmup={warmup_steps}")
+
     # Optimizer: AdamW (HAC) or Adam (Taxonomy-paper recipe — wd added to grad, not decoupled).
     # --curv-lr-scale (<1) puts the geometry scalars (curv, alphas) in a slower group so the
     # model learns the hierarchy via embeddings instead of cheaply shrinking curv to widen cones.
@@ -368,12 +385,12 @@ def main():
     if args.scheduler == "onecycle":
         max_lrs = [g.get("lr_scale", 1.0) * args.lr for g in pg]
         sched = torch.optim.lr_scheduler.OneCycleLR(
-            opt, max_lr=max_lrs, total_steps=args.iters,
+            opt, max_lr=max_lrs, total_steps=total_iters,
             pct_start=args.onecycle_pct_start, anneal_strategy="cos",
             div_factor=args.lr / args.onecycle_min_lr, final_div_factor=1.0,
         )
     else:
-        sched = LinearWarmupCosineDecayLR(opt, total_steps=args.iters, warmup_steps=args.warmup)
+        sched = LinearWarmupCosineDecayLR(opt, total_steps=total_iters, warmup_steps=warmup_steps)
     scaler = torch.amp.GradScaler("cuda")
 
     # wandb (rank 0 only): config = all hyperparams incl lambda_sel + effective batch.
@@ -396,7 +413,7 @@ def main():
     data_iter = iter(loader)
     epoch = 0
     sel_terms: dict = {}  # last-micro-step SEL decomposition, refreshed before each log
-    while it < args.iters:
+    while it < total_iters:
         opt.zero_grad(set_to_none=True)
         # collect the SEL term breakdown on the last micro-step of an iter that will log.
         is_log_iter = (it + 1) % args.log_every == 0
@@ -422,7 +439,7 @@ def main():
             with sync_ctx, torch.amp.autocast("cuda"):
                 loss, cl, sel = forward_loss(
                     ddp_model, pixel_values, taxonomy_batch, args.lambda_sel,
-                    stats=step_stats, indep_intra=args.independent_intra,
+                    stats=step_stats, sel_indep=(args.sel_text == "independent"),
                     contrastive=args.contrastive, ranks=ranks,
                     sel_tau=args.sel_tau, sel_leak=args.sel_leak,
                     sel_uncertainty=args.sel_uncertainty, cl_mask=args.cl_mask,
@@ -446,7 +463,7 @@ def main():
             ips = args.log_every * eff_batch / (time.perf_counter() - t0)
             avg_loss, avg_cl, avg_sel = run_loss / n, run_cl / n, run_sel / n
             lr = sched.get_last_lr()[0]
-            log(f"it {it:>6}/{args.iters} | loss {avg_loss:.4f} cl {avg_cl:.4f} "
+            log(f"it {it:>6}/{total_iters} | loss {avg_loss:.4f} cl {avg_cl:.4f} "
                 f"sel {avg_sel:.4f} | lr {lr:.2e} | curv {model.curvature.item():.3f} | "
                 f"{ips:.0f} img/s")
             if wb is not None:
@@ -468,7 +485,7 @@ def main():
         if it % args.eval_every == 0:
             if is_main():
                 metrics = _run_periodic_eval(
-                    model, eval_sets, args.num_workers, indep_intra=args.independent_intra,
+                    model, eval_sets, args.num_workers, sel_indep=(args.sel_text == "independent"),
                     ranks=ranks,
                 )
                 log(f"  [eval it {it}] "
