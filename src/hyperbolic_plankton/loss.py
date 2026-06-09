@@ -32,17 +32,24 @@ __all__ = [
 
 
 def hyperbolic_contrastive_loss(
-    img: torch.Tensor, text: torch.Tensor, curv: torch.Tensor | float, scale: torch.Tensor | float
+    img: torch.Tensor, text: torch.Tensor, curv: torch.Tensor | float, scale: torch.Tensor | float,
+    class_ids: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Symmetric InfoNCE with logits = -pairwise_dist * scale (MERU).
 
     Single-process / square (B×B) form. For DDP with cross-GPU negatives use
     `hyperbolic_contrastive_loss_ddp`, which gathers text/image across processes so each
     image is scored against the GLOBAL batch (MERU/HAC behaviour).
+
+    `class_ids` [B] (optional): same-class off-diagonal cells are masked out of the
+    negatives (true positives mis-treated as negatives). None = standard InfoNCE.
     """
     B = img.shape[0]
     dist = L.pairwise_dist(img, text, curv)
     logits = -dist * scale
+    if class_ids is not None:
+        mask = _false_negative_mask(class_ids, class_ids, 0)
+        logits = logits.masked_fill(mask, float("-inf"))
     targets = torch.arange(B, device=img.device)
     return 0.5 * (F.cross_entropy(logits, targets) + F.cross_entropy(logits.T, targets))
 
@@ -63,8 +70,32 @@ def _gather_across_processes(t: torch.Tensor) -> torch.Tensor:
     return torch.cat(list(nn_all_gather(t)), dim=0)
 
 
+def _gather_labels(ids: torch.Tensor) -> torch.Tensor:
+    """All-gather an int label tensor [B] -> [B*world] (non-differentiable; labels carry no
+    grad). Returns the input unchanged off-DDP. Used to build the cross-GPU negative mask."""
+    import torch.distributed as dist
+
+    if not (dist.is_available() and dist.is_initialized()) or dist.get_world_size() == 1:
+        return ids
+    out = [torch.zeros_like(ids) for _ in range(dist.get_world_size())]
+    dist.all_gather(out, ids)
+    return torch.cat(out, dim=0)
+
+
+def _false_negative_mask(local_ids: torch.Tensor, all_ids: torch.Tensor, rank: int) -> torch.Tensor:
+    """Bool mask [B, B*world] marking negative cells to SUPPRESS: same-class pairs that are
+    not the matched diagonal. `*_ids` are per-sample class ids; cell (i,j) is suppressed when
+    local_ids[i] == all_ids[j] and j is not i's own diagonal (i + B*rank)."""
+    B = local_ids.shape[0]
+    same = local_ids[:, None] == all_ids[None, :]            # [B, B*world]
+    diag = torch.arange(B, device=local_ids.device) + B * rank
+    same[torch.arange(B, device=local_ids.device), diag] = False  # keep the true positive
+    return same
+
+
 def hyperbolic_contrastive_loss_ddp(
-    img: torch.Tensor, text: torch.Tensor, curv: torch.Tensor | float, scale: torch.Tensor | float
+    img: torch.Tensor, text: torch.Tensor, curv: torch.Tensor | float, scale: torch.Tensor | float,
+    class_ids: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """MERU/HAC contrastive loss with cross-GPU negatives.
 
@@ -72,11 +103,15 @@ def hyperbolic_contrastive_loss_ddp(
     text/image (B*world), so the negative set is the full effective batch — not just the
     local micro-batch. Targets are shifted by `B * rank` to hit the matched diagonal in the
     gathered set. Falls back to the local square loss when not under DDP.
+
+    `class_ids` [B] (optional): per-sample class id. When given, same-class off-diagonal
+    cells are masked OUT of the negatives (they are true positives mis-treated as negatives —
+    pervasive in clade-imbalanced plankton batches). None = no masking (standard InfoNCE).
     """
     import torch.distributed as dist
 
     if not (dist.is_available() and dist.is_initialized()) or dist.get_world_size() == 1:
-        return hyperbolic_contrastive_loss(img, text, curv, scale)
+        return hyperbolic_contrastive_loss(img, text, curv, scale, class_ids)
 
     B = img.shape[0]
     rank = dist.get_rank()
@@ -86,12 +121,17 @@ def hyperbolic_contrastive_loss_ddp(
     # local image vs all text; local text vs all image (MERU/HAC orientation)
     img_logits = -L.pairwise_dist(img, all_text, curv) * scale   # [B, B*world]
     text_logits = -L.pairwise_dist(text, all_img, curv) * scale  # [B, B*world]
+    if class_ids is not None:
+        mask = _false_negative_mask(class_ids, _gather_labels(class_ids), rank)
+        img_logits = img_logits.masked_fill(mask, float("-inf"))
+        text_logits = text_logits.masked_fill(mask, float("-inf"))
     targets = torch.arange(B, device=img.device) + B * rank
     return 0.5 * (F.cross_entropy(img_logits, targets) + F.cross_entropy(text_logits, targets))
 
 
 def hyperbolic_angle_contrastive_loss_ddp(
-    img: torch.Tensor, text: torch.Tensor, curv: torch.Tensor | float, scale: torch.Tensor | float
+    img: torch.Tensor, text: torch.Tensor, curv: torch.Tensor | float, scale: torch.Tensor | float,
+    class_ids: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Angle-based contrastive loss (ATMG, "Accept the Modality Gap"), cross-GPU negatives.
 
@@ -100,20 +140,28 @@ def hyperbolic_angle_contrastive_loss_ddp(
     Asymmetric apex convention (ATMG models.py): text is the apex (minimise angle at text),
     image fans out (maximise angle at image) — i.e. the image is an instance of its deepest
     text. Targets shifted by B*rank; falls back to the local square form off-DDP.
+
+    `class_ids` [B] (optional): same-class off-diagonal cells masked out of negatives.
     """
     import torch.distributed as dist
 
     B = img.shape[0]
     if not (dist.is_available() and dist.is_initialized()) or dist.get_world_size() == 1:
         all_img, all_text, rank = img, text, 0
+        all_ids = class_ids
     else:
         all_img = _gather_across_processes(img)
         all_text = _gather_across_processes(text)
         rank = dist.get_rank()
+        all_ids = _gather_labels(class_ids) if class_ids is not None else None
 
     # angle at image (maximise for match) / angle at text (minimise for match)
     img_logits = L.pairwise_oxy_angle(img, all_text, curv) * scale    # [B, B*world]
     text_logits = -L.pairwise_oxy_angle(text, all_img, curv) * scale  # [B, B*world]
+    if class_ids is not None:
+        mask = _false_negative_mask(class_ids, all_ids, rank)
+        img_logits = img_logits.masked_fill(mask, float("-inf"))
+        text_logits = text_logits.masked_fill(mask, float("-inf"))
     targets = torch.arange(B, device=img.device) + B * rank
     return 0.5 * (F.cross_entropy(img_logits, targets) + F.cross_entropy(text_logits, targets))
 
