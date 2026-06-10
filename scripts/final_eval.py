@@ -59,6 +59,37 @@ def _bioscan_sets():
     return (seen_ds, _present_classes(seen_ds)), (unseen_ds, _present_classes(unseen_ds)), BIOSCAN_RANKS
 
 
+def run_final_eval(model, dataset, geometry="hyperbolic", num_workers=8, prefix="test"):
+    """Full seen/unseen test eval (the paper numbers) on an in-memory model.
+
+    Returns a flat dict `{<prefix>/<split>/<rank>_f1: float, ...}` plus `n`/`n_classes` per
+    split, suitable for wandb logging. `dataset` is 'planktonzilla' or 'bioscan'. Used both
+    by `main()` (CLI from a checkpoint) and at end-of-training (in-process, logged to wandb).
+    """
+    sets = _bioscan_sets() if dataset == "bioscan" else _planktonzilla_sets()
+    (seen_ds, seen_classes), (unseen_ds, unseen_classes), ranks = sets
+
+    was_training = model.training
+    model.eval()
+    out: dict = {}
+    for split, (ds, classes) in [("seen", (seen_ds, seen_classes)),
+                                 ("unseen", (unseen_ds, unseen_classes))]:
+        print(f"\n=== {split}: {len(ds):,} images, {len(classes)} classes ===")
+        res = run_unseen_eval(model, ds, classes, num_workers=num_workers, ranks=ranks,
+                              geometry=geometry)
+        m = flatten_metrics(res["metrics"], prefix=f"{prefix}/{split}")
+        out.update(m)
+        out[f"{prefix}/{split}/n"] = res["n"]
+        out[f"{prefix}/{split}/n_classes"] = res["n_classes"]
+        for r in ranks:
+            k = f"{prefix}/{split}/{r}_f1"
+            if k in m:
+                print(f"  {r:8s} macro-F1 = {m[k]:.4f}")
+    if was_training:
+        model.train()
+    return out
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--ckpt", required=True)
@@ -66,6 +97,9 @@ def main():
     ap.add_argument("--backbone", default="bioclip", choices=["clip", "bioclip"])
     ap.add_argument("--lora", action="store_true")
     ap.add_argument("--lora-r", type=int, default=128)
+    ap.add_argument("--geometry", default="hyperbolic", choices=["hyperbolic", "euclidean"],
+                    help="must match training: euclidean = cosine-argmax eval of the flat "
+                         "LoRA baseline; hyperbolic = lift + distance-argmin")
     ap.add_argument("--num-workers", type=int, default=8)
     args = ap.parse_args()
 
@@ -78,17 +112,7 @@ def main():
     model.to(device).eval()
     print(f"loaded {args.ckpt}  curv={model.curvature.item():.4f}")
 
-    sets = _bioscan_sets() if args.dataset == "bioscan" else _planktonzilla_sets()
-    (seen_ds, seen_classes), (unseen_ds, unseen_classes), ranks = sets
-
-    for name, (ds, classes) in [("seen", (seen_ds, seen_classes)), ("unseen", (unseen_ds, unseen_classes))]:
-        print(f"\n=== {name}: {len(ds):,} images, {len(classes)} classes ===")
-        res = run_unseen_eval(model, ds, classes, num_workers=args.num_workers, ranks=ranks)
-        m = flatten_metrics(res["metrics"], prefix=name)
-        for r in ranks:
-            k = f"{name}/{r}_f1"
-            if k in m:
-                print(f"  {r:8s} macro-F1 = {m[k]:.4f}")
+    run_final_eval(model, args.dataset, geometry=args.geometry, num_workers=args.num_workers)
 
 
 if __name__ == "__main__":

@@ -17,7 +17,7 @@ from peft import LoraConfig, get_peft_model
 
 from .plain_mha import replace_mha_with_plain
 
-__all__ = ["apply_lora", "count_trainable"]
+__all__ = ["apply_lora", "unfreeze_backbone", "count_trainable"]
 
 _ATTN_SUBMODULES = ("q_proj", "k_proj", "v_proj", "proj")
 
@@ -97,6 +97,19 @@ def apply_lora(
     model.backbone_trainable = True
 
     return model
+
+
+def unfreeze_backbone(model) -> None:
+    """Make the whole CLIP backbone trainable — the FULL fine-tune setting (Planktonzilla
+    recipe). The inverse of the frozen default: every backbone param gets `requires_grad`
+    and the forward builds a graph. Use INSTEAD of `apply_lora` for the full-FT baseline.
+
+    (`--no-lora` alone leaves the backbone FROZEN = projector-only; this is the actual
+    full fine-tune.)
+    """
+    for p in model.clip.parameters():
+        p.requires_grad = True
+    model.backbone_trainable = True
 
 
 def _final_ln(peft_clip, tower: str) -> nn.Module:

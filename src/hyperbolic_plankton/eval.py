@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import numpy as np
 import torch
+import torch.nn.functional as F
 from sklearn.metrics import f1_score, precision_score, recall_score
 
 from . import lorentz as L
@@ -65,23 +66,35 @@ def build_unseen_classes(unseen_full: list[str], seen_full: set[str]) -> list[st
 # --------------------------------------------------------------------------------
 
 @torch.no_grad()
-def encode_prototypes(model, class_strings: list[str], prompt: str = PROMPT, batch_size: int = 256) -> torch.Tensor:
-    """Encode each class's name into a hyperbolic text prototype `[C, D]`."""
+def encode_prototypes(model, class_strings: list[str], prompt: str = PROMPT, batch_size: int = 256,
+                      geometry: str = "hyperbolic") -> torch.Tensor:
+    """Encode each class's name into a text prototype `[C, D]`.
+
+    geometry="euclidean": the trained projected (pre-lift) features, L2-normalised, for the
+    flat-space cosine-argmax eval of the Euclidean-LoRA baseline.
+    """
     model.eval()
+    project = geometry != "euclidean"
     prompts = [prompt.format(label=c) for c in class_strings]
     chunks = []
     for i in range(0, len(prompts), batch_size):
-        chunks.append(model.encode_text(prompts[i : i + batch_size]))
-    return torch.cat(chunks, dim=0)
+        chunks.append(model.encode_text(prompts[i : i + batch_size], project=project))
+    protos = torch.cat(chunks, dim=0)
+    return F.normalize(protos, dim=-1) if geometry == "euclidean" else protos
 
 
 @torch.no_grad()
-def predict(img_embs: torch.Tensor, proto_embs: torch.Tensor, curv) -> torch.Tensor:
-    """Nearest-prototype index per image: argmin Lorentzian distance `[B] -> [0..C-1]`.
+def predict(img_embs: torch.Tensor, proto_embs: torch.Tensor, curv,
+            geometry: str = "hyperbolic") -> torch.Tensor:
+    """Nearest-prototype index per image `[B] -> [0..C-1]`.
 
-    Hyperbolic analogue of the paper's `argmax(100 * img @ text.T)` over normalized
-    cosine; smaller hyperbolic distance = better, so we argmin.
+    hyperbolic: argmin Lorentzian distance (analogue of the paper's cosine argmax; smaller
+    hyperbolic distance = better). euclidean: argmax cosine on L2-normalised features
+    (`img_embs` normalised here; prototypes pre-normalised) — the paper's exact CLIP rule.
     """
+    if geometry == "euclidean":
+        img_embs = F.normalize(img_embs, dim=-1)
+        return (img_embs @ proto_embs.T).argmax(dim=1)  # [B, C] cosine
     dist = L.pairwise_dist(img_embs, proto_embs, curv)  # [B, C]
     return dist.argmin(dim=1)
 
@@ -188,8 +201,13 @@ def run_unseen_eval(
     num_workers: int = 8,
     limit: int | None = None,
     ranks: list[str] = RANKS,
+    geometry: str = "hyperbolic",
 ) -> dict:
     """End-to-end Table-3-style unseen eval: encode prototypes, predict, score.
+
+    geometry="euclidean" runs the flat-space cosine-argmax eval (the trained projector's
+    pre-lift features) for the Euclidean-LoRA baseline; "hyperbolic" is the default lift +
+    distance-argmin.
 
     `unseen_ds` is an `HFTaxonomyDataset` over held-out rows whose `full` string is in
     `classes` (filter first with `build_unseen_classes` + a `full in classes` select).
@@ -201,8 +219,9 @@ def run_unseen_eval(
     from .train import TaxonomyCollator
 
     model.eval()
-    protos = encode_prototypes(model, classes, prompt=prompt)
+    protos = encode_prototypes(model, classes, prompt=prompt, geometry=geometry)
     curv = model.curvature
+    project = geometry != "euclidean"
 
     collate = TaxonomyCollator(model.preprocess, ranks=ranks)
     loader = DataLoader(
@@ -213,8 +232,8 @@ def run_unseen_eval(
     true_full: list[str] = []
     pred_idx: list[int] = []
     for pixel_values, taxonomy_batch, _ in loader:
-        img = model.encode_image(pixel_values.to(model.device))
-        pred_idx.extend(predict(img, protos, curv).tolist())
+        img = model.encode_image(pixel_values.to(model.device), project=project)
+        pred_idx.extend(predict(img, protos, curv, geometry=geometry).tolist())
         true_full.extend(taxonomy_batch["full"])
         if limit is not None and len(true_full) >= limit:
             break

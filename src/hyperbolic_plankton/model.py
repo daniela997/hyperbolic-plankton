@@ -13,6 +13,7 @@ learnable MERU scalars (curv, alpha, logit_scale), and the exp_map0 lift. No LoR
 from __future__ import annotations
 
 import math
+import warnings
 
 import open_clip
 import torch
@@ -23,8 +24,12 @@ from . import lorentz as L
 __all__ = ["build_backbone", "HyperbolicCLIP"]
 
 
-# open_clip identifiers for the two inits we use. OpenAI weights expect QuickGELU, so
-# we load the `-quickgelu` arch variant to avoid the activation mismatch warning.
+# open_clip identifiers for the two inits we use. OpenAI weights were pretrained with
+# QuickGELU; we deliberately load the plain `ViT-B-16` (GELU) arch instead — QuickGELU's
+# higher activation-memory cost triggered OOM when adapting/full-finetuning this backbone.
+# open_clip therefore warns about the activation mismatch; it is cosmetic (the GELU/QuickGELU
+# drift is small and, being constant across ALL our runs, cancels out of every comparison).
+# The warning is filtered in build_backbone.
 _BACKBONES = {
     "clip": dict(model_name="ViT-B-16", pretrained="openai"),
     "bioclip": dict(model_name="hf-hub:imageomics/bioclip", pretrained=None),
@@ -42,9 +47,13 @@ def build_backbone(name: str):
     if name not in _BACKBONES:
         raise ValueError(f"Unknown backbone '{name}'. Options: {list(_BACKBONES)}")
     cfg = _BACKBONES[name]
-    model, _, preprocess = open_clip.create_model_and_transforms(
-        cfg["model_name"], pretrained=cfg["pretrained"]
-    )
+    # The GELU-vs-QuickGELU mismatch is intentional (see _BACKBONES); filter only that
+    # specific cosmetic warning, not warnings in general.
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", message=".*QuickGELU mismatch.*")
+        model, _, preprocess = open_clip.create_model_and_transforms(
+            cfg["model_name"], pretrained=cfg["pretrained"]
+        )
     model.eval()
     for p in model.parameters():
         p.requires_grad = False

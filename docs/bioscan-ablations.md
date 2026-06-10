@@ -30,6 +30,41 @@ PYTHONPATH=src torchrun --nproc_per_node=2 --master_port=29555 scripts/train_lor
 
 ---
 
+## E0 — Euclidean-LoRA baseline (flat CLIP InfoNCE, no SEL)
+The missing 2×2 corner: same backbone + LoRA + projector as B0, but **flat space** — cosine
+InfoNCE (open_clip `ClipLoss`), no exp-map lift, no SEL. Isolates LoRA-vs-full-FT (vs
+Planktonzilla) from Euclidean-vs-hyperbolic (vs B0). `--geometry euclidean` forces
+`--lambda-sel 0`; the `--contrastive`/`--sel-*` flags are ignored. Run both via
+`scripts/run_ablations_euclidean.sh`. Read each with `final_eval.py ... --geometry euclidean`
+(cosine-argmax eval).
+
+We do **not** have a validated LoRA-CLIP-contrastive recipe — B0's optimizer (lr 5e-5,
+wd 1e-4, adam) was inherited from the Taxonomies paper (full-FT, no LoRA) + HAC (LoRA-on-CLIP
+but hyperbolic VQA). Full-FT hyperparams need not suit LoRA, so we run two variants:
+
+**E0a — HAC-grounded LoRA recipe.** HAC's `train_hac_vit_b_lora.py` is the closest
+LoRA-on-CLIP precedent: lr **2.5e-4**, wd **0.2** (excluded from LoRA params — our
+`param_groups` does the same via the `lora_` no-decay rule), adamw, r=128, warmup ~13%.
+This is the "good LoRA recipe" answer and serves the LoRA-vs-full-FT-vs-Planktonzilla story.
+```
+--lr 2.5e-4 --wd 0.2 --optimizer adamw \
+--tag bioscan_E0a_euclidean_lora_hac
+```
+
+**E0b — B0-matched.** Identical to B0 except `--geometry euclidean`, so E0b-vs-B0 is a
+clean Euclidean-vs-hyperbolic delta (zero optimizer confounds).
+```
+--lr 5e-5 --wd 1e-4 --optimizer adam \
+--tag bioscan_E0b_euclidean_b0matched
+```
+
+> **Epochs = 50** here (as everywhere) is a *fixed shared budget for cross-run
+> comparability*, not a tuned value. Planktonzilla trains 100 epochs at batch 16,384; we
+> train 50 at batch 768 (21× smaller), so step-count parity is already off regardless — 50
+> is kept because it matches the rest of the ladder and BIOSCAN runs are cheap (~2,360 steps).
+
+---
+
 ## C1 — SEL text cumulative
 B0 but SEL uses the cumulative `full` string for both SEL terms (CL already uses full).
 Tests whether the paper's independent-`T_r` choice helps us, or cumulative (shared-prefix

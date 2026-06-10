@@ -39,6 +39,7 @@ from hyperbolic_plankton.eval import (
 from hyperbolic_plankton.loss import (
     _deepest_text,
     _dense_ids,
+    euclidean_contrastive_loss_ddp,
     hyperbolic_angle_contrastive_loss_ddp,
     hyperbolic_contrastive_loss_ddp,
     stacked_entailment_loss,
@@ -47,6 +48,8 @@ from hyperbolic_plankton.lora import apply_lora, count_trainable
 from hyperbolic_plankton.model import HyperbolicCLIP
 from hyperbolic_plankton.optim import LinearWarmupCosineDecayLR, param_groups
 from hyperbolic_plankton.train import TaxonomyCollator
+
+from final_eval import run_final_eval  # sibling script (scripts/ on path via torchrun)
 
 CACHE = "/scratch/daniela/planktonzilla_cache/plankton"
 CKPT_DIR = "/scratch/daniela/hyperbolic_plankton_ckpts"
@@ -138,11 +141,14 @@ def _build_eval_sets_bioscan(args):
     }
 
 
-def _run_periodic_eval(model, eval_sets, num_workers, sel_indep=True, ranks=RANKS):
+def _run_periodic_eval(model, eval_sets, num_workers, sel_indep=True, ranks=RANKS,
+                       geometry="hyperbolic"):
     """Eval seen-val + unseen subsamples + per-rank geometry; flat wandb-loggable dict.
 
     `sel_indep` must match training so the logged loss_terms reflect the SAME SEL the
     optimiser sees (independent per-rank text iff training uses it; cumulative otherwise).
+    geometry="euclidean" runs cosine-argmax eval and skips the hyperbolic-only geometry/SEL
+    diagnostics (the Euclidean baseline has no cones or curvature to report).
     """
     from hyperbolic_plankton.train import TaxonomyCollator
 
@@ -150,9 +156,15 @@ def _run_periodic_eval(model, eval_sets, num_workers, sel_indep=True, ranks=RANK
     model.eval()
     out = {}
     for name, (ds, classes) in eval_sets["sets"].items():
-        res = run_unseen_eval(model, ds, classes, num_workers=num_workers, ranks=ranks)
+        res = run_unseen_eval(model, ds, classes, num_workers=num_workers, ranks=ranks,
+                              geometry=geometry)
         out.update(flatten_metrics(res["metrics"], prefix=f"eval/{name}"))
         out[f"eval/{name}/n_classes"] = res["n_classes"]
+
+    if geometry == "euclidean":
+        if was_training:
+            model.train()
+        return out
 
     # geometry diagnostics + SEL term decomposition on the fixed batch
     pixel_values, taxonomy_batch, _ = TaxonomyCollator(model.preprocess, ranks=ranks)(
@@ -193,23 +205,30 @@ def log(msg):
 
 def forward_loss(model, pixel_values, taxonomy_batch, lambda_sel, stats=None,
                  sel_indep=True, contrastive="distance", ranks=RANKS,
-                 sel_tau=1.0, sel_leak=0.0, sel_uncertainty=0.0, cl_mask="none", lambda_cl=1.0):
+                 sel_tau=1.0, sel_leak=0.0, sel_uncertainty=0.0, cl_mask="none", lambda_cl=1.0,
+                 geometry="hyperbolic"):
     """lambda_cl*contrastive(img, deepest_text) + lambda_sel*SEL. `model` may be a DDP
     wrapper; geometry helpers live on the underlying module.
 
     Set lambda_cl=0 for SEL-only, lambda_sel=0 for CL-only (the unused branch still runs for
     logging but contributes no gradient).
 
+    geometry="euclidean" is the flat-space LoRA baseline: cosine InfoNCE (open_clip ClipLoss)
+    on the projected pre-lift features, no SEL (lambda_sel is forced to 0 by the caller). It
+    exists to isolate LoRA-vs-full-FT from hyperbolic-vs-Euclidean.
+
     If `stats` (a dict) is given, the SEL per-edge pos/neg decomposition is collected into
     it (cheap float reads) for per-step logging alongside cl/sel.
     """
     core = model.module if isinstance(model, DDP) else model
-    img = core.encode_image(pixel_values)
+    euclidean = geometry == "euclidean"
+    project = not euclidean  # euclidean CL works on the pre-exp-map projected features
+    img = core.encode_image(pixel_values, project=project)
     curv = core.curvature
     scale = core.logit_scale.exp()
     # Contrastive: align image to its deepest CUMULATIVE (`full`) text — the paper's
     # full-text-for-CL.
-    cum_embs = core.encode_taxonomy(taxonomy_batch)
+    cum_embs = core.encode_taxonomy(taxonomy_batch, project=project)
     deepest, _ = _deepest_text(cum_embs, ranks)
     # cl_mask: suppress same-class off-diagonal negatives (true positives mis-treated as
     # negatives — ~4.4% of pairs in clade-imbalanced plankton batches). class id = dense id
@@ -217,9 +236,16 @@ def forward_loss(model, pixel_values, taxonomy_batch, lambda_sel, stats=None,
     class_ids = None
     if cl_mask == "same":
         class_ids = _dense_ids(taxonomy_batch["full"], img.device)
-    cl_fn = (hyperbolic_angle_contrastive_loss_ddp if contrastive == "angle"
-             else hyperbolic_contrastive_loss_ddp)
+    if euclidean:
+        cl_fn = euclidean_contrastive_loss_ddp
+    elif contrastive == "angle":
+        cl_fn = hyperbolic_angle_contrastive_loss_ddp
+    else:
+        cl_fn = hyperbolic_contrastive_loss_ddp
     cl = cl_fn(img, deepest, curv, scale, class_ids=class_ids)
+    # SEL is hyperbolic-only (entailment cones); the Euclidean baseline is CL-only.
+    if euclidean:
+        return lambda_cl * cl, cl.detach(), cl.new_zeros(())
     # SEL — both intra (Eq.3) and inter (Eq.4) use the SAME text form. Paper-faithful is
     # INDEPENDENT per-rank `T_r` ('Rank: Value'): distinct per-rank concepts give SEL the
     # radial-separation gradient it needs (cumulative ranks are near-collinear). `cumulative`
@@ -265,9 +291,14 @@ def main():
     ap.add_argument("--lambda-cl", type=float, default=1.0,
                     help="weight on the contrastive term. 0 = SEL-only (paper's strongest "
                          "unseen rows); --lambda-sel 0 = CL-only")
+    ap.add_argument("--geometry", default="hyperbolic", choices=["hyperbolic", "euclidean"],
+                    help="hyperbolic=Lorentz lift + (CL[+SEL]); euclidean=flat CLIP InfoNCE "
+                         "baseline (open_clip ClipLoss, cosine; no SEL/lift). The Euclidean-LoRA "
+                         "baseline isolates LoRA-vs-full-FT from hyperbolic-vs-Euclidean.")
     ap.add_argument("--contrastive", default="distance", choices=["distance", "angle"],
                     help="distance=MERU InfoNCE on -pairwise_dist; angle=ATMG exterior-angle "
-                         "InfoNCE (radius-free, same oxy_angle quantity as SEL)")
+                         "InfoNCE (radius-free, same oxy_angle quantity as SEL). "
+                         "Ignored when --geometry euclidean.")
     ap.add_argument("--cl-mask", default="none", choices=["none", "same"],
                     help="mask same-class off-diagonal CL negatives (true positives "
                          "mis-treated as negatives, ~4.4%% of plankton batch pairs). "
@@ -299,10 +330,20 @@ def main():
     ap.add_argument("--no-reinit-final-ln", action="store_true",
                     help="keep CLIP's pretrained final-LN params (only unfreeze); default "
                          "re-inits to fresh LN as HAC does")
+    ap.add_argument("--no-final-eval", action="store_true",
+                    help="skip the end-of-training full seen/unseen test eval (the paper "
+                         "numbers, logged to wandb test/*). Useful for quick debug runs.")
     ap.add_argument("--num-workers", type=int, default=6)
     ap.add_argument("--ckpt-every", type=int, default=2000)
     ap.add_argument("--log-every", type=int, default=50)
-    ap.add_argument("--eval-every", type=int, default=1000)
+    ap.add_argument("--eval-epochs", type=float, default=None,
+                    help="periodic eval cadence in EPOCHS (e.g. 1.0 = once/epoch). Derives the "
+                         "step interval from steps_per_epoch, so the cadence is consistent "
+                         "across datasets. Overrides --eval-every when set.")
+    ap.add_argument("--eval-every", type=int, default=1000,
+                    help="periodic eval cadence in optimizer STEPS (used unless --eval-epochs "
+                         "is set). steps/epoch differ ~50× between bioscan and planktonzilla, "
+                         "so prefer --eval-epochs for per-epoch cadence.")
     ap.add_argument("--eval-cap", type=int, default=50,
                     help="periodic eval: max rows per proposed_label class (stratified "
                          "subsample, so macro-F1 tracks the full-split value with low variance)")
@@ -310,6 +351,8 @@ def main():
     ap.add_argument("--wandb-project", default="hyperbolic-plankton")
     ap.add_argument("--no-wandb", action="store_true")
     args = ap.parse_args()
+    if args.geometry == "euclidean":
+        args.lambda_sel = 0.0  # SEL is hyperbolic-only; the Euclidean baseline is CL-only
 
     ddp = "RANK" in os.environ
     if ddp:
@@ -371,8 +414,12 @@ def main():
     steps_per_epoch = max(1, len(loader) // args.accum)
     total_iters = args.iters if args.iters is not None else int(args.epochs * steps_per_epoch)
     warmup_steps = max(1, int(args.warmup_frac * total_iters))
+    # eval cadence: --eval-epochs (in epochs) takes precedence and is derived from
+    # steps_per_epoch so it means the same thing on bioscan and planktonzilla.
+    if args.eval_epochs is not None:
+        args.eval_every = max(1, round(args.eval_epochs * steps_per_epoch))
     log(f"steps/epoch={steps_per_epoch}  epochs={args.epochs}  total_steps={total_iters}  "
-        f"warmup={warmup_steps}")
+        f"warmup={warmup_steps}  eval_every={args.eval_every}")
 
     # Optimizer: AdamW (HAC) or Adam (Taxonomy-paper recipe — wd added to grad, not decoupled).
     # --curv-lr-scale (<1) puts the geometry scalars (curv, alphas) in a slower group so the
@@ -449,7 +496,7 @@ def main():
                     contrastive=args.contrastive, ranks=ranks,
                     sel_tau=args.sel_tau, sel_leak=args.sel_leak,
                     sel_uncertainty=args.sel_uncertainty, cl_mask=args.cl_mask,
-                    lambda_cl=args.lambda_cl,
+                    lambda_cl=args.lambda_cl, geometry=args.geometry,
                 )
                 loss = loss / args.accum
             scaler.scale(loss).backward()
@@ -493,7 +540,7 @@ def main():
             if is_main():
                 metrics = _run_periodic_eval(
                     model, eval_sets, args.num_workers, sel_indep=(args.sel_text == "independent"),
-                    ranks=ranks,
+                    ranks=ranks, geometry=args.geometry,
                 )
                 log(f"  [eval it {it}] "
                     f"unseen species_f1={metrics.get('eval/unseen/species_f1', 0):.4f} "
@@ -513,9 +560,23 @@ def main():
         path = os.path.join(CKPT_DIR, f"{args.tag}_final.pt")
         torch.save({"model": model.state_dict(), "it": it, "args": vars(args)}, path)
         log(f"DONE. saved {path}")
+
+        # Final test eval (the paper numbers): FULL seen+unseen splits, present-classes,
+        # per-rank macro-F1 — logged to wandb under test/*. Skippable for quick debug runs.
+        if not args.no_final_eval:
+            log("running final test eval (full seen/unseen splits)...")
+            test_metrics = run_final_eval(
+                model, args.dataset, geometry=args.geometry, num_workers=args.num_workers,
+            )
+            if wb is not None:
+                wb.log(test_metrics, step=it)
+                wb.summary.update(test_metrics)
         if wb is not None:
             wb.finish()
+    # non-rank-0 ranks wait while rank 0 runs the (rank-0-only) final eval, so the process
+    # group isn't torn down underneath it.
     if ddp:
+        dist.barrier()
         dist.destroy_process_group()
 
 

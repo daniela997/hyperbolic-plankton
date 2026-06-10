@@ -23,6 +23,7 @@ from . import lorentz as L
 
 __all__ = [
     "hyperbolic_contrastive_loss",
+    "euclidean_contrastive_loss_ddp",
     "entailment_pos",
     "entailment_neg",
     "sel_intra",
@@ -158,6 +159,45 @@ def hyperbolic_angle_contrastive_loss_ddp(
     # angle at image (maximise for match) / angle at text (minimise for match)
     img_logits = L.pairwise_oxy_angle(img, all_text, curv) * scale    # [B, B*world]
     text_logits = -L.pairwise_oxy_angle(text, all_img, curv) * scale  # [B, B*world]
+    if class_ids is not None:
+        mask = _false_negative_mask(class_ids, all_ids, rank)
+        img_logits = img_logits.masked_fill(mask, float("-inf"))
+        text_logits = text_logits.masked_fill(mask, float("-inf"))
+    targets = torch.arange(B, device=img.device) + B * rank
+    return 0.5 * (F.cross_entropy(img_logits, targets) + F.cross_entropy(text_logits, targets))
+
+
+def euclidean_contrastive_loss_ddp(
+    img: torch.Tensor, text: torch.Tensor, curv: torch.Tensor | float, scale: torch.Tensor | float,
+    class_ids: torch.Tensor | None = None,
+) -> torch.Tensor:
+    """Flat-space CLIP InfoNCE with cross-GPU negatives (open_clip `ClipLoss`).
+
+    The Euclidean baseline: cosine-similarity InfoNCE, identical to open_clip's `ClipLoss`
+    (`logit_scale * img_n @ text_n.T`, symmetric CE, labels shifted by B*rank). Isolates the
+    LoRA variable from the hyperbolic-geometry variable — same frozen backbone + LoRA +
+    projector as the hyperbolic model, but flat space and no entailment.
+
+    `img`/`text` are the projected Euclidean features (`encode_*(project=False)`); they are
+    L2-normalised here. `curv` is accepted and ignored (signature-compatible with the
+    hyperbolic CL functions so the train loop can swap losses without special-casing args).
+    `class_ids` masks same-class off-diagonal negatives as in the hyperbolic versions.
+    """
+    import torch.distributed as dist
+
+    B = img.shape[0]
+    img = F.normalize(img, dim=-1)
+    text = F.normalize(text, dim=-1)
+    if not (dist.is_available() and dist.is_initialized()) or dist.get_world_size() == 1:
+        all_img, all_text, rank, all_ids = img, text, 0, class_ids
+    else:
+        all_img = _gather_across_processes(img)
+        all_text = _gather_across_processes(text)
+        rank = dist.get_rank()
+        all_ids = _gather_labels(class_ids) if class_ids is not None else None
+
+    img_logits = scale * img @ all_text.T   # [B, B*world]
+    text_logits = scale * text @ all_img.T  # [B, B*world]
     if class_ids is not None:
         mask = _false_negative_mask(class_ids, all_ids, rank)
         img_logits = img_logits.masked_fill(mask, float("-inf"))
