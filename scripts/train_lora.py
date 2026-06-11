@@ -324,15 +324,31 @@ def main():
                     help="hold curvature fixed at init (removes the curvature-collapse "
                          "shortcut so SEL must update embeddings, not shrink cones)")
     ap.add_argument("--lora-r", type=int, default=128)
+    ap.add_argument("--lora-visual-blocks", type=int, default=4,
+                    help="adapt LoRA to the last N visual transformer blocks (ViT-B has 12; "
+                         "HAC-B recipe = 4). Use 12 to adapt ALL blocks — lets LoRA correct "
+                         "low-level features (relevant under a large domain shift like plankton)")
+    ap.add_argument("--lora-text-blocks", type=int, default=8,
+                    help="adapt LoRA to the last N text transformer blocks (12 total; "
+                         "HAC-B = 8). Use 12 for all blocks")
     ap.add_argument("--no-lora", action="store_true",
                     help="projector-only (skip LoRA) = the scratchpad regime; for the "
                          "disentangling probe of whether LoRA (not LR) drives the collapse")
+    ap.add_argument("--no-proj", action="store_true",
+                    help="drop the visual_proj/textual_proj heads (identity) so the model is "
+                         "architecturally identical to a bare full-FT CLIP. Euclidean only "
+                         "(E0c): the clean LoRA-vs-full-FT calibration vs the Planktonzilla "
+                         "CLIP weights. Incompatible with hyperbolic (needs a proj into the lift)")
     ap.add_argument("--no-reinit-final-ln", action="store_true",
                     help="keep CLIP's pretrained final-LN params (only unfreeze); default "
                          "re-inits to fresh LN as HAC does")
     ap.add_argument("--no-final-eval", action="store_true",
                     help="skip the end-of-training full seen/unseen test eval (the paper "
                          "numbers, logged to wandb test/*). Useful for quick debug runs.")
+    ap.add_argument("--compile", action="store_true",
+                    help="torch.compile the backbone forward (model.clip) for ~1.2-1.8x. "
+                         "Safest on the euclidean runs (no exp_map in the graph); may hit "
+                         "graph breaks with the hyperbolic ops.")
     ap.add_argument("--num-workers", type=int, default=6)
     ap.add_argument("--ckpt-every", type=int, default=2000)
     ap.add_argument("--log-every", type=int, default=50)
@@ -351,8 +367,14 @@ def main():
     ap.add_argument("--wandb-project", default="hyperbolic-plankton")
     ap.add_argument("--no-wandb", action="store_true")
     args = ap.parse_args()
+    # Enable TF32 matmuls on Ampere (A5000) — free ~5-15% on the fp32 portions (projector,
+    # LoRA, the forced-fp32 exp_map), no accuracy concern at this scale.
+    torch.set_float32_matmul_precision("high")
     if args.geometry == "euclidean":
         args.lambda_sel = 0.0  # SEL is hyperbolic-only; the Euclidean baseline is CL-only
+    if args.no_proj and args.geometry != "euclidean":
+        raise SystemExit("--no-proj is euclidean-only (hyperbolic needs a projection into "
+                         "the lift). Use --geometry euclidean.")
 
     ddp = "RANK" in os.environ
     if ddp:
@@ -370,10 +392,13 @@ def main():
 
     # model (+ LoRA unless --no-lora, which gives the scratchpad's projector-only regime:
     # frozen backbone under no_grad, only projector + MERU scalars trainable).
-    model = HyperbolicCLIP(backbone=args.backbone, learn_curv=not args.freeze_curv)
+    model = HyperbolicCLIP(backbone=args.backbone, learn_curv=not args.freeze_curv,
+                           use_proj=not args.no_proj)
     if not args.no_lora:
         model = apply_lora(
             model, r=args.lora_r, alpha=args.lora_r,
+            adapt_visual_blocks=args.lora_visual_blocks,
+            adapt_text_blocks=args.lora_text_blocks,
             reinit_final_ln=not args.no_reinit_final_ln,
         )
     model.to(device)
@@ -381,6 +406,14 @@ def main():
         c = count_trainable(model)
         log(f"trainable params: {c['trainable']:,} / {c['total']:,} "
             f"({100 * c['trainable'] / c['total']:.2f}%)")
+    # Optionally compile the backbone forward (the FLOP-heavy part; the geometry ops in
+    # _lift/exp_map stay eager). We compile the encode_image/encode_text METHODS, because
+    # that's what HyperbolicCLIP.encode_* actually call — compiling model.clip itself is a
+    # no-op since its forward() is never invoked. Keeps the hyperbolic ops out of the graph.
+    if args.compile:
+        model.clip.encode_image = torch.compile(model.clip.encode_image)
+        model.clip.encode_text = torch.compile(model.clip.encode_text)
+        log("torch.compile applied to backbone encode_image/encode_text")
     ddp_model = DDP(model, device_ids=[device.index], find_unused_parameters=True) if ddp else model
 
     # data: load the prebuilt Planktonzilla-faithful splits (scripts/build_splits.py).
@@ -463,6 +496,7 @@ def main():
     it = 0
     t0 = time.perf_counter()
     run_cl = run_sel = run_loss = 0.0
+    best_unseen = -1.0  # track best periodic unseen mean-F1 -> save _best.pt (peak often mid-run)
     data_iter = iter(loader)
     epoch = 0
     sel_terms: dict = {}  # last-micro-step SEL decomposition, refreshed before each log
@@ -547,6 +581,18 @@ def main():
                     f"seen species_f1={metrics.get('eval/seen/species_f1', 0):.4f}")
                 if wb is not None:
                     wb.log(metrics, step=it)
+                # best-unseen checkpoint: the unseen optimum is often mid-run (the LR ramp
+                # walks the model off it later), so keep the peak, not just _final. Score =
+                # mean unseen per-rank F1 (more stable than the near-zero species rank alone).
+                unseen_fs = [v for k, v in metrics.items()
+                             if k.startswith("eval/unseen/") and k.endswith("_f1")]
+                cur = sum(unseen_fs) / len(unseen_fs) if unseen_fs else -1.0
+                if cur > best_unseen:
+                    best_unseen = cur
+                    path = os.path.join(CKPT_DIR, f"{args.tag}_best.pt")
+                    torch.save({"model": model.state_dict(), "it": it, "args": vars(args),
+                                "unseen_mean_f1": cur}, path)
+                    log(f"  ↑ best unseen mean-F1 {cur:.4f} -> saved {path}")
             if ddp:
                 dist.barrier()
             t0 = time.perf_counter()  # don't count eval time in img/s

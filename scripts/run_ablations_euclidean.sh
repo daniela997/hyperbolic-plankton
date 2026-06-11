@@ -42,10 +42,18 @@ run_euclidean() {
     echo "🚀 Starting run: $TAG  (dataset=$DATASET)"
     echo "================================================================="
 
+    # NOTE: short --epochs + HAC-shape schedule. The first 50-epoch planktonzilla E0a run
+    # showed BOTH seen and unseen F1 peak at epoch ~4 then DECLINE while OneCycle's LR was
+    # still RAMPING toward its peak (pct_start=0.3 → 30% of training spent climbing) — the
+    # long ramp walked the model off the early optimum. Fix: HAC's own schedule shape
+    # (--scheduler warmupcos = LinearWarmupCosineDecayLR, short --warmup-frac then decay),
+    # so peak LR is hit early (~epoch 0.5) and the useful window is in the decay phase, not
+    # the ramp. LoRA-CLIP fine-tunes are short (cf. AMD clipora ~3 ep): 5 ep, lr 1e-4.
+    # --eval-epochs 0.5 so the early peak is sampled. Pass --epochs to override per run.
     PYTHONPATH=src torchrun --nproc_per_node=2 --master_port=29556 scripts/train_lora.py \
-        --dataset "$DATASET" --backbone clip --epochs 50 --micro-bs 128 --accum 3 \
-        --scheduler onecycle --lora-r 128 --eval-epochs 1 \
-        --geometry euclidean --lambda-cl 1.0 --cl-mask none \
+        --dataset "$DATASET" --backbone clip --epochs 5 --micro-bs 128 --accum 3 \
+        --scheduler warmupcos --warmup-frac 0.1 --lora-r 128 --eval-epochs 0.5 \
+        --geometry euclidean --lambda-cl 1.0 --cl-mask none --compile \
         --wandb-project "$WANDB_PROJECT" \
         "$@" \
         --tag "$TAG"
@@ -55,9 +63,17 @@ run_euclidean() {
 # PLANKTONZILLA — start here (full-FT reference already known from the paper)
 # ==============================================================================
 
-# E0a — HAC-grounded LoRA recipe (lr 2.5e-4 / wd 0.2 / adamw)
-run_euclidean "planktonzilla_E0a_euclidean_lora_hac" planktonzilla \
-    --lr 2.5e-4 --wd 0.2 --optimizer adamw
+# E0a — short LoRA recipe: 5 epochs, lr 1e-4 (replaces the 50-epoch/2.5e-4 run that
+# declined after epoch ~4). wd 0.2 / adamw retained from the HAC LoRA recipe.
+run_euclidean "planktonzilla_E0a_euclidean_lora_5ep_lr1e-4" planktonzilla \
+    --lr 1e-4 --wd 0.2 --optimizer adamw
+
+# E0c — like E0a but --no-proj: drops our visual_proj/textual_proj heads so the model is
+# architecturally IDENTICAL to a bare full-FT CLIP (CLIP + LoRA only -> cosine). This is the
+# clean LoRA-vs-full-FT calibration against the Planktonzilla CLIP weights (no extra-projector
+# confound). Differs from E0a by the projector ONLY.
+# run_euclidean "planktonzilla_E0c_euclidean_lora_noproj" planktonzilla \
+#     --lr 1e-4 --wd 0.2 --optimizer adamw --no-proj
 
 # E0b — B0-matched recipe (lr 5e-5 / wd 1e-4 / adam)
 # run_euclidean "planktonzilla_E0b_euclidean_b0matched" planktonzilla \

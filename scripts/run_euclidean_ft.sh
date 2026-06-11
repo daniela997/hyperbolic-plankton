@@ -30,7 +30,7 @@ run_ft() {
 
     PYTHONPATH=src torchrun --nproc_per_node=2 --master_port=29557 scripts/train_euclidean_ft.py \
         --backbone clip --micro-bs 128 --accum 3 --epochs 50 \
-        --scheduler onecycle --eval-epochs 1 \
+        --scheduler onecycle --eval-epochs 1 --compile \
         --wandb-project hyperbolic-plankton-euclidean \
         "$@" \
         --tag "$TAG"

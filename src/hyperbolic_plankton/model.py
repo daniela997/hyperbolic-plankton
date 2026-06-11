@@ -75,6 +75,7 @@ class HyperbolicCLIP(nn.Module):
         embed_dim: int | None = None,
         curv_init: float = 1.0,
         learn_curv: bool = True,
+        use_proj: bool = True,
     ):
         super().__init__()
         self.backbone_name = backbone
@@ -90,11 +91,22 @@ class HyperbolicCLIP(nn.Module):
         self.embed_dim = embed_dim or backbone_dim
 
         # Learnable projection heads (trained from scratch; backbone is frozen).
-        # CLIP-style init, matching HAC's AdaptedCLIP.
-        self.visual_proj = nn.Linear(backbone_dim, self.embed_dim, bias=False)
-        self.textual_proj = nn.Linear(backbone_dim, self.embed_dim, bias=False)
-        nn.init.normal_(self.visual_proj.weight, std=backbone_dim**-0.5)
-        nn.init.normal_(self.textual_proj.weight, std=backbone_dim**-0.5)
+        # CLIP-style init, matching HAC's AdaptedCLIP. With use_proj=False they become
+        # identity, so encode_* return the raw CLIP output — architecturally identical to a
+        # bare (full-FT) open_clip CLIP, for the LoRA-vs-full-FT calibration (E0c). Requires
+        # embed_dim == backbone_dim (true for ViT-B/16: both 512).
+        self.use_proj = use_proj
+        if use_proj:
+            self.visual_proj = nn.Linear(backbone_dim, self.embed_dim, bias=False)
+            self.textual_proj = nn.Linear(backbone_dim, self.embed_dim, bias=False)
+            nn.init.normal_(self.visual_proj.weight, std=backbone_dim**-0.5)
+            nn.init.normal_(self.textual_proj.weight, std=backbone_dim**-0.5)
+        else:
+            if self.embed_dim != backbone_dim:
+                raise ValueError(f"use_proj=False needs embed_dim==backbone_dim, got "
+                                 f"{self.embed_dim} vs {backbone_dim}")
+            self.visual_proj = nn.Identity()
+            self.textual_proj = nn.Identity()
 
         # MERU scalars.
         self.curv = nn.Parameter(torch.tensor(curv_init).log(), requires_grad=learn_curv)

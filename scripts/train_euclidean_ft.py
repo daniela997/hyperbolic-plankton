@@ -77,10 +77,13 @@ def main():
     ap.add_argument("--eval-every", type=int, default=200,
                     help="periodic eval cadence in optimizer STEPS (used unless --eval-epochs)")
     ap.add_argument("--eval-cap", type=int, default=50)
+    ap.add_argument("--compile", action="store_true",
+                    help="torch.compile the backbone forward (model.clip) for ~1.2-1.8x")
     ap.add_argument("--tag", default="euclidean_ft")
     ap.add_argument("--wandb-project", default="hyperbolic-plankton")
     ap.add_argument("--no-wandb", action="store_true")
     args = ap.parse_args()
+    torch.set_float32_matmul_precision("high")  # TF32 on Ampere (A5000) — free fp32 speedup
     # Fixed for the full-FT euclidean baseline: flat cosine InfoNCE, no SEL. These let us
     # reuse train_lora.forward_loss / _run_periodic_eval unchanged.
     args.geometry = "euclidean"
@@ -112,6 +115,11 @@ def main():
         c = count_trainable(model)
         log(f"trainable params: {c['trainable']:,} / {c['total']:,} "
             f"({100 * c['trainable'] / c['total']:.2f}%)  [full fine-tune]")
+    if args.compile:
+        # compile the methods actually called by encode_* (compiling model.clip is a no-op)
+        model.clip.encode_image = torch.compile(model.clip.encode_image)
+        model.clip.encode_text = torch.compile(model.clip.encode_text)
+        log("torch.compile applied to backbone encode_image/encode_text")
     ddp_model = DDP(model, device_ids=[device.index], find_unused_parameters=True) if ddp else model
 
     # data: identical splits + loader as train_lora (Planktonzilla-faithful).
@@ -179,6 +187,7 @@ def main():
     it = 0
     t0 = time.perf_counter()
     run_loss = 0.0
+    best_unseen = -1.0  # track best periodic unseen mean-F1 -> save _best.pt
     data_iter = iter(loader)
     epoch = 0
     while it < total_iters:
@@ -238,6 +247,16 @@ def main():
                     f"seen species_f1={metrics.get('eval/seen/species_f1', 0):.4f}")
                 if wb is not None:
                     wb.log(metrics, step=it)
+                # best-unseen checkpoint (peak is often mid-run): score = mean unseen F1.
+                unseen_fs = [v for k, v in metrics.items()
+                             if k.startswith("eval/unseen/") and k.endswith("_f1")]
+                cur = sum(unseen_fs) / len(unseen_fs) if unseen_fs else -1.0
+                if cur > best_unseen:
+                    best_unseen = cur
+                    path = os.path.join(CKPT_DIR, f"{args.tag}_best.pt")
+                    torch.save({"model": model.state_dict(), "it": it, "args": vars(args),
+                                "unseen_mean_f1": cur}, path)
+                    log(f"  ↑ best unseen mean-F1 {cur:.4f} -> saved {path}")
             if ddp:
                 dist.barrier()
             t0 = time.perf_counter()

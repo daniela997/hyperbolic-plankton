@@ -127,6 +127,7 @@ entail_ok).
 | **A3** | `--sel-leak 0.1 --sel-tau 0.7` | leaky+tighter cones un-saturate apertures, spread upper ranks | order/family aperture < π/2; radii more stratified; entail_ok meaningful (not trivially 1.0) |
 | **A4** | `--sel-uncertainty 0.5` | radius=uncertainty penalty pushes parents out → ranks deeper, ragged leaves depth-appropriate | upper-rank radii spread; no seen regression |
 | **A6** | `--sel-text cumulative` | does the paper's independent-T_r choice actually help us, or does cumulative (shared-prefix tree) work better in the frozen+projector regime? | compare unseen F1 + geometry vs B0 (independent) |
+| **A7** | `--lora-r ∈ {8, 32, 128}` (sub-sweep) | r=128 is HAC-B's *large*-config capacity setting, inherited as our default — **not** geometry-specific (LoRA acts on the Euclidean backbone matrices; rank is orthogonal to the hyperbolic output). HAC's own rank ablation (their Tab. 3) is nearly flat: r 8→128 buys only ~0.7% on VQA. So a smaller rank likely matches r=128 here at far fewer params — which **strengthens the parameter-efficiency thesis** (vs 64×H100 full-FT) | a low rank (8 or 32) within ~noise of r=128 on unseen F1 → adopt the smaller rank as the headline "parameter-efficient" config. Cheap; run on BIOSCAN, and ideally also on the Euclidean E0 (the lever is geometry-agnostic, so E0 is a clean place to measure it) |
 | **A5** | best-of(A1–A4,A6) combined | the winning terms compose | beats B0 on unseen; geometry clean |
 
 Notes:
