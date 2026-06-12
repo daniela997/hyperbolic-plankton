@@ -47,14 +47,25 @@ def stratified_split_seen(
     val / test, both stratified by `full` class. `seen_ds` must already exclude the 4
     held-out datasets (use `data.split_seen_unseen` first).
     """
+    from datasets import ClassLabel
+
     seen_ds = _add_full_column(seen_ds, num_proc=num_proc)
+
+    # Encode `full` as ONE global ClassLabel over the whole seen pool, exactly as the paper
+    # does at dataset-build time (gen_datasets: ClassLabel(names=sorted(set(tax_label)))).
+    # HF's stratified shuffle groups by the integer label, so the int encoding ORDER changes
+    # which rows land in each split even at the same seed. Building the encoding once globally
+    # (not per-dataset, per-call) is what makes our split reproduce theirs row-for-row; a
+    # per-call sorted(set(sub)) gives each sub-dataset a different int map -> different rows.
+    global_names = sorted(set(seen_ds["full"]))
+    seen_ds = seen_ds.cast_column("full", ClassLabel(names=global_names))
 
     train_parts, val_parts, test_parts = [], [], []
     dataset_names = sorted(set(seen_ds["dataset"]))
 
     for dname in dataset_names:
         sub = seen_ds.filter(lambda b: [d == dname for d in b["dataset"]], batched=True, num_proc=num_proc)
-        labels = sub["full"]
+        labels = sub["full"]  # now integer class ids (global encoding), like their `label`
         counts = Counter(labels)
         singletons = {k for k, v in counts.items() if v == 1}
 
@@ -92,22 +103,19 @@ def y_not_singleton(y, singletons):
 
 
 def _safe_split(ds, test_size, seed):
-    """train_test_split stratified by `full`, falling back to unstratified on ValueError
-    (HF raises when a class has too few members to stratify).
+    """train_test_split stratified by the pre-encoded global `full` ClassLabel, falling back
+    to unstratified on ValueError (HF raises when a class has too few members to stratify) —
+    the paper's exact `try/except ValueError`.
 
-    `stratify_by_column` needs a ClassLabel-typed column, so cast `full` -> a transient
-    ClassLabel for the call (the paper stratifies on the integer-encoded class likewise).
+    `ds.full` must ALREADY be a ClassLabel typed with the global encoding (done once in
+    stratified_split_seen); we do NOT re-derive a per-call encoding here, so the int label
+    map is identical across every sub-dataset — matching how the paper stratifies on its one
+    global `label` column.
     """
-    from datasets import ClassLabel, Value
-
     try:
-        names = sorted(set(ds["full"]))
-        ds_cl = ds.cast_column("full", ClassLabel(names=names))
-        out = ds_cl.train_test_split(
+        out = ds.train_test_split(
             test_size=test_size, shuffle=True, seed=seed, stratify_by_column="full"
         )
-    except (ValueError, TypeError):
+    except ValueError:
         out = ds.train_test_split(test_size=test_size, shuffle=True, seed=seed)
-    # cast `full` back to a plain string so all splits share aligned features (the
-    # ClassLabel typing would otherwise break the singleton concat downstream).
-    return out.cast_column("full", Value("string"))
+    return out
