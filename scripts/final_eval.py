@@ -110,6 +110,12 @@ def main():
     ap.add_argument("--backbone", default="bioclip", choices=["clip", "bioclip"])
     ap.add_argument("--lora", action="store_true")
     ap.add_argument("--lora-r", type=int, default=128)
+    ap.add_argument("--lora-visual-blocks", type=int, default=4,
+                    help="LoRA-adapted visual blocks (must match training)")
+    ap.add_argument("--lora-text-blocks", type=int, default=8,
+                    help="LoRA-adapted text blocks (must match training)")
+    ap.add_argument("--no-proj", action="store_true",
+                    help="no visual/textual projection head (E0c architecture, euclidean)")
     ap.add_argument("--geometry", default="hyperbolic", choices=["hyperbolic", "euclidean"],
                     help="must match training: euclidean = cosine-argmax eval of the flat "
                          "LoRA baseline; hyperbolic = lift + distance-argmin")
@@ -117,9 +123,11 @@ def main():
     args = ap.parse_args()
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    model = HyperbolicCLIP(backbone=args.backbone)
+    model = HyperbolicCLIP(backbone=args.backbone, use_proj=not args.no_proj)
     if args.lora:
-        model = apply_lora(model, r=args.lora_r, alpha=args.lora_r)
+        model = apply_lora(model, r=args.lora_r, alpha=args.lora_r,
+                           adapt_visual_blocks=args.lora_visual_blocks,
+                           adapt_text_blocks=args.lora_text_blocks)
     sd = torch.load(args.ckpt, map_location="cpu")
     model.load_state_dict(sd.get("model", sd), strict=False)
     model.to(device).eval()
