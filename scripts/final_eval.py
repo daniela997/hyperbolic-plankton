@@ -35,16 +35,29 @@ def _present_classes(ds) -> list[str]:
     return sorted({ds[i]["taxonomy"]["full"] for i in range(len(ds))} - {"unknown"})
 
 
+def _select_annotated(cache, idx):
+    """Select `idx` rows, dropping those with no taxonomy (empty Kingdom -> full=='unknown').
+
+    Their eval dataset is built with `filter(Kingdom != "")` (gen_datasets.build_final_
+    planktonzilla), so it contains NO unannotated rows. Our cache does; including them put a
+    spurious 'unknown' class into the macro-F1 (true='unknown' vs pred=some real class),
+    depressing the coarse ranks (kingdom 0.80 vs paper 0.96). Matching their filter fixes it."""
+    sub = cache.select(idx)
+    keep = [i for i, k in enumerate(sub["Kingdom"]) if k not in (None, "", "nan")]
+    return sub.select(keep)
+
+
 def _planktonzilla_sets():
     """(seen_ds, seen_classes), (unseen_ds, unseen_classes) over the FULL splits.
 
     Class sets = classes PRESENT in each full eval split (matches Planktonzilla's CLIP
-    eval). unseen uses the prebuilt 220-class set (the paper's exact unseen benchmark)."""
+    eval). unseen uses the prebuilt 220-class set (the paper's exact unseen benchmark).
+    Unannotated (empty-Kingdom) rows are dropped to match their dataset (see _select_annotated)."""
     cache = load_from_disk(CACHE)
     test_idx = np.load(f"{SPLIT_DIR}/test_idx.npy")
     unseen_idx = np.load(f"{SPLIT_DIR}/unseen_idx.npy")
-    seen_ds = HFTaxonomyDataset(cache.select(test_idx.tolist()))
-    unseen_ds = HFTaxonomyDataset(cache.select(unseen_idx.tolist()))
+    seen_ds = HFTaxonomyDataset(_select_annotated(cache, test_idx.tolist()))
+    unseen_ds = HFTaxonomyDataset(_select_annotated(cache, unseen_idx.tolist()))
     seen_classes = _present_classes(seen_ds)
     with open(f"{SPLIT_DIR}/unseen_classes.json") as f:
         unseen_classes = json.load(f)  # paper's fixed 220-class unseen benchmark

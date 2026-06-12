@@ -79,6 +79,16 @@ def _stratified_subsample(cache, idx, cap, seed):
     return out
 
 
+def _drop_unannotated(sub):
+    """Drop rows with no taxonomy (empty Kingdom -> full=='unknown'), matching Planktonzilla's
+    eval dataset (built with `filter(Kingdom != "")`). Including them injects a spurious
+    'unknown' class into macro-F1, depressing the coarse ranks. No-op on BIOSCAN (complete)."""
+    if "Kingdom" not in sub.column_names:
+        return sub
+    keep = [i for i, k in enumerate(sub["Kingdom"]) if k not in (None, "", "nan")]
+    return sub.select(keep)
+
+
 def _build_eval_sets(cache, args):
     """Fixed, seeded subsamples of seen-val and unseen for periodic eval (rank 0 only).
 
@@ -94,12 +104,12 @@ def _build_eval_sets(cache, args):
         seen_classes = json.load(f)
     val_idx = np.load(f"{SPLIT_DIR}/val_idx.npy")
     sel = _stratified_subsample(cache, val_idx, args.eval_cap, seed=0)
-    seen_val = cache.select(sorted(sel.tolist()))
+    seen_val = _drop_unannotated(cache.select(sorted(sel.tolist())))
     seen_ds = HFTaxonomyDataset(seen_val)
 
     unseen_idx = np.load(f"{SPLIT_DIR}/unseen_idx.npy")
     sel = _stratified_subsample(cache, unseen_idx, args.eval_cap, seed=0)
-    unseen_sub = cache.select(sorted(sel.tolist()))
+    unseen_sub = _drop_unannotated(cache.select(sorted(sel.tolist())))
     unseen_ds = HFTaxonomyDataset(unseen_sub)
     with open(f"{SPLIT_DIR}/unseen_classes.json") as f:
         unseen_classes = json.load(f)
