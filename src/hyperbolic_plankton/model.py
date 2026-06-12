@@ -147,14 +147,18 @@ class HyperbolicCLIP(nn.Module):
         return L.exp_map0(feats, self.curvature)
 
     def encode_image(self, pixel_values: torch.Tensor, project: bool = True) -> torch.Tensor:
-        with torch.set_grad_enabled(self.backbone_trainable):
+        # Honor backbone_trainable for grad ONLY when grad is already enabled (training).
+        # Under an outer no_grad/inference_mode (eval), keep grad OFF — otherwise a
+        # set_grad_enabled(True) here overrides the eval guard and the autograd graph
+        # accumulates across the whole eval loop -> OOM.
+        with torch.set_grad_enabled(self.backbone_trainable and torch.is_grad_enabled()):
             feats = self.clip.encode_image(pixel_values, normalize=False)
         feats = self.visual_proj(feats)
         return self._lift(feats, self.visual_alpha) if project else feats
 
     def encode_text(self, texts: list[str], project: bool = True) -> torch.Tensor:
         tokens = self.tokenizer(texts).to(self.device)
-        with torch.set_grad_enabled(self.backbone_trainable):
+        with torch.set_grad_enabled(self.backbone_trainable and torch.is_grad_enabled()):
             feats = self.clip.encode_text(tokens, normalize=False)
         feats = self.textual_proj(feats)
         return self._lift(feats, self.textual_alpha) if project else feats
