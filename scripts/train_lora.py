@@ -629,10 +629,14 @@ def main():
                 wb.summary.update(test_metrics)
         if wb is not None:
             wb.finish()
-    # non-rank-0 ranks wait while rank 0 runs the (rank-0-only) final eval, so the process
-    # group isn't torn down underneath it.
-    if ddp:
-        dist.barrier()
+        if ddp:
+            dist.destroy_process_group()
+    elif ddp:
+        # The final eval is rank-0-only and runs FAR longer than NCCL's default 600s
+        # collective timeout. Don't make idle ranks wait on a barrier — the NCCL watchdog
+        # would abort them mid-eval and take the whole job down (which is what killed the
+        # end-of-training eval before this fix). They have nothing to contribute, so just
+        # tear down and exit; rank 0 owns its own teardown above.
         dist.destroy_process_group()
 
 
