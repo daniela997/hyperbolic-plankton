@@ -334,6 +334,12 @@ def main():
                     help="hold curvature fixed at init (removes the curvature-collapse "
                          "shortcut so SEL must update embeddings, not shrink cones)")
     ap.add_argument("--lora-r", type=int, default=128)
+    ap.add_argument("--lora-alpha", type=int, default=None,
+                    help="LoRA alpha (default: =r). With use_rslora the update scale is "
+                         "alpha/sqrt(r), so to ADD CAPACITY (raise r) without changing the "
+                         "effective step size, raise alpha as alpha=alpha_old*sqrt(r/r_old) "
+                         "(e.g. r 32->64 at matched scale: alpha 32->45). Tying alpha=r "
+                         "instead inflates the step by sqrt(r/r_old) and can diverge.")
     ap.add_argument("--lora-visual-blocks", type=int, default=4,
                     help="adapt LoRA to the last N visual transformer blocks (ViT-B has 12; "
                          "HAC-B recipe = 4). Use 12 to adapt ALL blocks — lets LoRA correct "
@@ -406,7 +412,8 @@ def main():
                            use_proj=not args.no_proj)
     if not args.no_lora:
         model = apply_lora(
-            model, r=args.lora_r, alpha=args.lora_r,
+            model, r=args.lora_r,
+            alpha=args.lora_alpha if args.lora_alpha is not None else args.lora_r,
             adapt_visual_blocks=args.lora_visual_blocks,
             adapt_text_blocks=args.lora_text_blocks,
             reinit_final_ln=not args.no_reinit_final_ln,

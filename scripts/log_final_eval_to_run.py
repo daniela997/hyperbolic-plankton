@@ -33,6 +33,8 @@ def main():
     ap.add_argument("--backbone", default="clip", choices=["clip", "bioclip"])
     ap.add_argument("--lora", action="store_true")
     ap.add_argument("--lora-r", type=int, default=32)
+    ap.add_argument("--lora-alpha", type=int, default=None,
+                    help="LoRA alpha (default =r); MUST match training")
     ap.add_argument("--lora-visual-blocks", type=int, default=4)
     ap.add_argument("--lora-text-blocks", type=int, default=8)
     ap.add_argument("--no-proj", action="store_true")
@@ -43,7 +45,8 @@ def main():
     device = "cuda" if torch.cuda.is_available() else "cpu"
     model = HyperbolicCLIP(backbone=args.backbone, use_proj=not args.no_proj)
     if args.lora:
-        model = apply_lora(model, r=args.lora_r, alpha=args.lora_r,
+        model = apply_lora(model, r=args.lora_r,
+                           alpha=args.lora_alpha if args.lora_alpha is not None else args.lora_r,
                            adapt_visual_blocks=args.lora_visual_blocks,
                            adapt_text_blocks=args.lora_text_blocks)
     sd = torch.load(args.ckpt, map_location="cpu")
