@@ -300,9 +300,10 @@ def main():
     ap.add_argument("--wd", type=float, default=0.2)
     ap.add_argument("--optimizer", default="adamw", choices=["adamw", "adam"],
                     help="adamw=HAC; adam=Taxonomy-paper recipe")
-    ap.add_argument("--scheduler", default="onecycle", choices=["warmupcos", "onecycle"],
-                    help="onecycle=Taxonomy-paper OneCycleLR (super-convergence, default); "
-                         "warmupcos=HAC linear-warmup+cos^2. --lr is the OneCycle PEAK.")
+    ap.add_argument("--scheduler", default="warmupcos", choices=["warmupcos", "onecycle"],
+                    help="warmupcos=HAC linear-warmup+cos^2 (default; lower LR converged "
+                         "better here than onecycle@3e-4). onecycle=Taxonomy-paper OneCycleLR "
+                         "(--lr is then the PEAK).")
     ap.add_argument("--onecycle-pct-start", type=float, default=0.3)
     ap.add_argument("--onecycle-min-lr", type=float, default=1e-6)
     ap.add_argument("--curv-lr-scale", type=float, default=1.0,
