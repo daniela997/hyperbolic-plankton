@@ -546,7 +546,14 @@ def main():
                 config={**vars(args), **extra},
             )
 
-    os.makedirs(CKPT_DIR, exist_ok=True)
+    # Per-run checkpoint dir so reusing a --tag never overwrites an earlier run's checkpoints
+    # (a same-tag rerun previously clobbered 759e1par's). Suffix with the wandb run id when we
+    # have one (stable, matches the dashboard), else a timestamp for --no-wandb runs.
+    run_id = wb.id if (wb is not None and hasattr(wb, "id")) else time.strftime("%Y%m%d_%H%M%S")
+    run_ckpt_dir = os.path.join(CKPT_DIR, f"{args.tag}__{run_id}")
+    if is_main():
+        os.makedirs(run_ckpt_dir, exist_ok=True)
+        log(f"checkpoints -> {run_ckpt_dir}")
     ddp_model.train()
     it = 0
     t0 = time.perf_counter()
@@ -644,7 +651,7 @@ def main():
                 cur = sum(unseen_fs) / len(unseen_fs) if unseen_fs else -1.0
                 if cur > best_unseen:
                     best_unseen = cur
-                    path = os.path.join(CKPT_DIR, f"{args.tag}_best.pt")
+                    path = os.path.join(run_ckpt_dir, f"{args.tag}_best.pt")
                     torch.save({"model": trainable_state_dict(model), "it": it,
                                 "args": vars(args), "unseen_mean_f1": cur}, path)
                     log(f"  ↑ best unseen mean-F1 {cur:.4f} -> saved {path}")
@@ -653,12 +660,12 @@ def main():
             t0 = time.perf_counter()  # don't count eval time in img/s
 
         if is_main() and it % args.ckpt_every == 0:
-            path = os.path.join(CKPT_DIR, f"{args.tag}_it{it}.pt")
+            path = os.path.join(run_ckpt_dir, f"{args.tag}_it{it}.pt")
             torch.save({"model": trainable_state_dict(model), "it": it, "args": vars(args)}, path)
             log(f"  saved {path}")
 
     if is_main():
-        path = os.path.join(CKPT_DIR, f"{args.tag}_final.pt")
+        path = os.path.join(run_ckpt_dir, f"{args.tag}_final.pt")
         torch.save({"model": trainable_state_dict(model), "it": it, "args": vars(args)}, path)
         log(f"DONE. saved {path}")
 
