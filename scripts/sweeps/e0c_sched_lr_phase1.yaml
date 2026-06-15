@@ -1,0 +1,52 @@
+# Phase 1 (revised): separate "lower LR helps" from "warmupcos vs onecycle", which the
+# earlier sweep confounded (it only had onecycle@3e-4 vs warmupcos@1e-4/2e-4). 2x2 grid:
+# {warmupcos, onecycle} x {1e-4, 2e-4}, all bf16, run to ~3 epochs (the crossover where the
+# LR ranking stabilises is epoch ~2 — 1 epoch is too short and mis-ranks lr=1e-4). Judged on
+# the subsample monitor's seen species_f1.
+#
+# Past data (fp16) said lr=1e-4 warmupcos > 2e-4 > 3e-4, and 6e-4 diverges. This re-tests the
+# winners in bf16 and fills the missing onecycle cells so the schedule comparison is clean.
+#
+#   wandb sweep --project hyperbolic-plankton-euclidean scripts/sweeps/e0c_sched_lr_phase1.yaml
+#   PYTHONPATH=src CUDA_VISIBLE_DEVICES=0 wandb agent <entity>/.../<sweep_id>
+#   PYTHONPATH=src CUDA_VISIBLE_DEVICES=1 wandb agent <entity>/.../<sweep_id>
+
+program: scripts/train_lora.py
+method: grid
+metric:
+  name: eval/seen/species_f1
+  goal: maximize
+
+parameters:
+  lr:
+    values: [1.0e-4, 2.0e-4]
+  scheduler:
+    values: [warmupcos, onecycle]
+
+command:
+  - ${env}
+  - python
+  - ${program}
+  - --dataset=planktonzilla
+  - --backbone=clip
+  - --epochs=3
+  - --micro-bs=128
+  - --accum=3
+  - --wd=0.2
+  - --optimizer=adamw
+  - --warmup-frac=0.1
+  - --onecycle-pct-start=0.3
+  - --onecycle-min-lr=1e-6
+  - --lora-r=32
+  - --lora-visual-blocks=12
+  - --lora-text-blocks=12
+  - --lambda-cl=1.0
+  - --cl-mask=none
+  - --geometry=euclidean
+  - --eval-epochs=0.5
+  - --eval-cap=50
+  - --wandb-project=hyperbolic-plankton-euclidean
+  - --no-proj
+  - --compile
+  - --no-final-eval
+  - ${args}   # expands the swept lr + scheduler
