@@ -208,6 +208,16 @@ def is_main():
     return not dist.is_initialized() or dist.get_rank() == 0
 
 
+def trainable_state_dict(model):
+    """The TRAINABLE params only (LoRA adapters + unfrozen final-LN + geometry scalars) —
+    everything training actually changed. The frozen CLIP backbone is recreated at load
+    from pretrained, so we skip it: ~615 MB -> ~16 MB per checkpoint. Eval scripts load with
+    strict=False, filling the frozen params from the backbone."""
+    core = model.module if isinstance(model, DDP) else model
+    train_keys = {n for n, p in core.named_parameters() if p.requires_grad}
+    return {k: v for k, v in core.state_dict().items() if k in train_keys}
+
+
 def log(msg):
     if is_main():
         print(msg, flush=True)
@@ -635,8 +645,8 @@ def main():
                 if cur > best_unseen:
                     best_unseen = cur
                     path = os.path.join(CKPT_DIR, f"{args.tag}_best.pt")
-                    torch.save({"model": model.state_dict(), "it": it, "args": vars(args),
-                                "unseen_mean_f1": cur}, path)
+                    torch.save({"model": trainable_state_dict(model), "it": it,
+                                "args": vars(args), "unseen_mean_f1": cur}, path)
                     log(f"  ↑ best unseen mean-F1 {cur:.4f} -> saved {path}")
             if ddp:
                 dist.barrier()
@@ -644,12 +654,12 @@ def main():
 
         if is_main() and it % args.ckpt_every == 0:
             path = os.path.join(CKPT_DIR, f"{args.tag}_it{it}.pt")
-            torch.save({"model": model.state_dict(), "it": it, "args": vars(args)}, path)
+            torch.save({"model": trainable_state_dict(model), "it": it, "args": vars(args)}, path)
             log(f"  saved {path}")
 
     if is_main():
         path = os.path.join(CKPT_DIR, f"{args.tag}_final.pt")
-        torch.save({"model": model.state_dict(), "it": it, "args": vars(args)}, path)
+        torch.save({"model": trainable_state_dict(model), "it": it, "args": vars(args)}, path)
         log(f"DONE. saved {path}")
 
         # Final test eval (the paper numbers): FULL seen+unseen splits, present-classes,
