@@ -386,6 +386,24 @@ def main():
     ap.add_argument("--wandb-project", default="hyperbolic-plankton")
     ap.add_argument("--no-wandb", action="store_true")
     args = ap.parse_args()
+
+    # wandb-sweep support: when launched by a `wandb agent`, the agent sets WANDB_SWEEP_ID
+    # and injects the trial's hyperparameters into wandb.config. Init that run NOW (rank 0
+    # only) and override the matching argparse fields, so a sweep drives the exact same code
+    # path as a manual CLI run. A descriptive tag is built from the swept knobs. This is a
+    # no-op for normal runs (no sweep id) — wandb.init then happens later as usual.
+    _sweep_run = None
+    if os.environ.get("WANDB_SWEEP_ID") and "RANK" not in os.environ:
+        import wandb
+        _sweep_run = wandb.init(dir=WANDB_DIR)
+        for k, v in dict(wandb.config).items():
+            if hasattr(args, k):
+                setattr(args, k, v)
+        args.tag = "sweep_" + "_".join(
+            f"{k}{getattr(args, k)}" for k in ("lr", "lora_r", "lora_alpha", "epochs")
+            if getattr(args, k, None) is not None)
+        _sweep_run.name = args.tag
+
     # Enable TF32 matmuls on Ampere (A5000) — free ~5-15% on the fp32 portions (projector,
     # LoRA, the forced-fp32 exp_map), no accuracy concern at this scale.
     torch.set_float32_matmul_precision("high")
@@ -506,11 +524,17 @@ def main():
         import wandb
 
         os.makedirs(WANDB_DIR, exist_ok=True)
-        wb = wandb.init(
-            project=args.wandb_project, name=args.tag, dir=WANDB_DIR,
-            config={**vars(args), "effective_batch": eff_batch, "world_size": world,
-                    "trainable_params": count_trainable(model)["trainable"]},
-        )
+        extra = {"effective_batch": eff_batch, "world_size": world,
+                 "trainable_params": count_trainable(model)["trainable"]}
+        if _sweep_run is not None:
+            # reuse the run the sweep agent already started (don't open a second one)
+            wb = _sweep_run
+            wb.config.update({**vars(args), **extra}, allow_val_change=True)
+        else:
+            wb = wandb.init(
+                project=args.wandb_project, name=args.tag, dir=WANDB_DIR,
+                config={**vars(args), **extra},
+            )
 
     os.makedirs(CKPT_DIR, exist_ok=True)
     ddp_model.train()

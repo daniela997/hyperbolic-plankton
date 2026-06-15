@@ -1,0 +1,41 @@
+# Phase 1: find a good LR for Euclidean E0c LoRA. Short (5ep) proxy runs judged on the
+# subsample monitor's deepest-rank seen F1 (rank-orders configs reliably; absolute values
+# are biased low vs the full split). Everything except lr is held at the working r=32 config.
+#
+#   cd /home/daniela/mine/hyperbolic-plankton
+#   wandb sweep --project hyperbolic-plankton-euclidean scripts/sweeps/e0c_lr_phase1.yaml
+#   # then on each free GPU (run in parallel):
+#   PYTHONPATH=src CUDA_VISIBLE_DEVICES=0 wandb agent <entity>/hyperbolic-plankton-euclidean/<sweep_id>
+#   PYTHONPATH=src CUDA_VISIBLE_DEVICES=1 wandb agent <entity>/hyperbolic-plankton-euclidean/<sweep_id>
+
+program: scripts/train_lora.py
+method: grid
+metric:
+  name: eval/seen/species_f1
+  goal: maximize
+
+parameters:
+  lr:
+    values: [1.0e-4, 3.0e-4, 6.0e-4, 1.0e-3]
+  # fixed (the working r=32 config); listed so they land in wandb.config and override argparse
+  dataset: {value: planktonzilla}
+  backbone: {value: clip}
+  epochs: {value: 5}
+  micro_bs: {value: 128}
+  accum: {value: 3}
+  wd: {value: 0.2}
+  optimizer: {value: adamw}
+  scheduler: {value: warmupcos}
+  warmup_frac: {value: 0.1}
+  lora_r: {value: 32}
+  lora_visual_blocks: {value: 12}
+  lora_text_blocks: {value: 12}
+  no_proj: {value: true}
+  geometry: {value: euclidean}
+  lambda_cl: {value: 1.0}
+  cl_mask: {value: none}
+  compile: {value: true}
+  eval_epochs: {value: 0.5}
+  eval_cap: {value: 50}
+  no_final_eval: {value: true}   # skip the slow full-split eval; the monitor is the proxy
+  wandb_project: {value: hyperbolic-plankton-euclidean}
