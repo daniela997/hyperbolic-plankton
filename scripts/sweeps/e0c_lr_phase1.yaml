@@ -1,6 +1,8 @@
-# Phase 1: find a good LR for Euclidean E0c LoRA. Short (5ep) proxy runs judged on the
-# subsample monitor's deepest-rank seen F1 (rank-orders configs reliably; absolute values
-# are biased low vs the full split).
+# Phase 1: find a good peak LR for Euclidean E0c LoRA under OneCycleLR (Taxonomy-paper
+# schedule, built for super-convergence in fewer epochs). Short (5ep) proxy runs judged on
+# the subsample monitor's deepest-rank seen F1 (rank-orders configs reliably; absolute
+# values are biased low vs the full split). lr here = OneCycle PEAK (reached after the 30%
+# warmup), so values run a bit higher than a plateau-LR sweep would.
 #
 # Only `lr` is swept (in `parameters`); EVERYTHING ELSE — including the store_true flags
 # (--compile/--no-proj/--no-final-eval), which the agent cannot serialize as --flag=True —
@@ -18,8 +20,8 @@ metric:
   goal: maximize
 
 parameters:
-  lr:
-    values: [1.0e-4, 3.0e-4, 6.0e-4, 1.0e-3]
+  lr:   # OneCycle peak LR
+    values: [3.0e-4, 6.0e-4, 1.0e-3, 2.0e-3]
 
 command:
   - ${env}
@@ -32,8 +34,9 @@ command:
   - --accum=3
   - --wd=0.2
   - --optimizer=adamw
-  - --scheduler=warmupcos
-  - --warmup-frac=0.1
+  - --scheduler=onecycle
+  - --onecycle-pct-start=0.3
+  - --onecycle-min-lr=1e-6
   - --lora-r=32
   - --lora-visual-blocks=12
   - --lora-text-blocks=12
