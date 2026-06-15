@@ -558,3 +558,48 @@ State at this point: **68 tests pass**. Pieces 1,2,3,4,5,7 verified.
   `encode_taxonomy` + (future) collator expect. Reuse `build_taxonomy_texts` logic.
 - Unseen split: hold out the 4 paper datasets via the `dataset` column.
 - Verify: load real rows, taxonomy dict shape, ragged handling, split sizes.
+
+## Euclidean-LoRA (E0c) tuning campaign — vs full-FT (2026-06-12 → 06-15)
+
+**Goal:** does Euclidean LoRA match the full-FT Planktonzilla CLIP on SEEN (the
+LoRA-vs-full-FT control). Full-FT bar in `docs/baseline-planktonzilla-clip.md` (commit
+`be58144`). All runs: `--no-proj` (architecture-identical to their CLIP), all 12+12 blocks,
+attention-only, planktonzilla.
+
+**Best result so far — E0c r=32, 20ep, lr 2e-4 warmupcos, fp16 (run `7r7cvoa3`):**
+full-split SEEN species 0.634 vs full-FT 0.818 (**−0.184**); the seen gap widens monotonically
+with depth (kingdom −0.04 → species −0.18). UNSEEN gaps small in absolute terms (both near
+the floor). LoRA recovers coarse taxonomy, not fine-grained discrimination. This is the
+"before" the bf16/OneCycle/sweep changes must beat.
+
+**Levers tried, attributed one at a time:**
+- **LoRA rank ✗** — r=64/α=64 DIVERGED (seen F1 climbed then collapsed). Cause: with
+  `use_rslora=True` the update scale is α/√r, so α=r inflates the step by √2 when r doubles
+  (not capacity). Fixed: `--lora-alpha` flag (commit `617bc9a`) to hold scale constant
+  (r=64/α=45). At matched scale r=64 ≈ or slightly BELOW r=32 → rank is NOT the bottleneck.
+- **Training duration** — r=32/30ep still running mid-campaign; user constrained to ≤20ep,
+  so duration deprioritized. (The 20ep flat tail was warmupcos decaying LR→0, not
+  convergence — motivated the OneCycle switch.)
+- **MLP adaptation** — `--lora-mlp` added (commit `7b3a4d9`, 3.9M→8.9M trainable params),
+  held in reserve: doubles params (hurts the efficiency story) and HAC adapts attention-only.
+  Untested; the fallback if LR/schedule don't close the gap.
+
+**Infra fixes from the campaign:**
+- Eval OOM (`33c23f4`): `encode_image/text` re-enabled grad under `no_grad` for LoRA models
+  (backbone_trainable=True) → graph accumulated over the eval loop → 23 GiB OOM. Gated on
+  `backbone_trainable and torch.is_grad_enabled()`. Affected ALL LoRA/hyperbolic evals.
+- NCCL final-eval timeout (`2e7f9f1`): rank-0-only final eval ran > NCCL's 600s barrier
+  timeout, so idle ranks aborted the job AFTER training/ckpt saved. Dropped the cross-rank
+  barrier (each rank tears down independently).
+- Adapter-only checkpoints (`6cfb44e`): 615 MB → 16 MB (frozen backbone recreated at load).
+- Per-run checkpoint dirs (`4858cd6`): `{tag}__{run_id}/` — same-tag reruns no longer clobber
+  (this had destroyed run `759e1par`'s checkpoints when a later same-tag run overwrote them).
+- bf16 training (`2bc49fb`): autocast fp16+GradScaler → bf16, scaler dropped (no underflow).
+  NOTE: old runs are fp16; new runs bf16 — not precision-matched.
+- OneCycleLR default (`5949fc2`): warmupcos → onecycle (Taxonomy-paper super-convergence;
+  `--lr` is now the PEAK). Aimed at faster convergence + the flat-tail problem.
+
+**Next:** wandb LR sweep `scripts/sweeps/e0c_lr_phase1.yaml` (OneCycle peak ∈
+{3e-4,6e-4,1e-3,2e-3}, 5ep proxy, bf16) — does a swept peak LR + OneCycle close the seen gap.
+Then full-split confirm the winner (fresh bf16+onecycle series, NOT comparable to the fp16
+0.634). MLP adaptation only if the gap persists.

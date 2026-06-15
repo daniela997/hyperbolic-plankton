@@ -33,6 +33,43 @@ are stable to <±0.006 across split rebuilds and identical fp16/fp32.
 | genus   | 0.052 | 0.065 | −0.013 |
 | species | 0.041 | 0.055 | −0.014 |
 
+## Best LoRA so far vs this baseline (E0c, r=32, all-blocks, no-proj, 20ep)
+
+Run `7r7cvoa3` (Euclidean-LoRA, `--no-proj`, r=32/α=32, all 12+12 blocks, lr 2e-4 warmupcos,
+fp16). Full-split `test/*`, same eval as the baseline. **This is the "before" — the bar the
+bf16/OneCycle/LR-sweep changes must beat.**
+
+SEEN (584,966 / 362):
+
+| rank | full-FT | LoRA E0c | gap |
+|---|---|---|---|
+| kingdom | 0.955 | 0.915 | −0.040 |
+| phylum  | 0.935 | 0.877 | −0.058 |
+| class   | 0.889 | 0.773 | −0.116 |
+| order   | 0.873 | 0.745 | −0.128 |
+| family  | 0.857 | 0.698 | −0.159 |
+| genus   | 0.832 | 0.669 | −0.163 |
+| species | 0.818 | 0.634 | −0.184 |
+
+UNSEEN (113,089 / 220):
+
+| rank | full-FT | LoRA E0c | gap |
+|---|---|---|---|
+| kingdom | 0.376 | 0.294 | −0.082 |
+| phylum  | 0.183 | 0.155 | −0.028 |
+| class   | 0.113 | 0.086 | −0.027 |
+| order   | 0.080 | 0.056 | −0.024 |
+| family  | 0.065 | 0.051 | −0.014 |
+| genus   | 0.052 | 0.046 | −0.006 |
+| species | 0.041 | 0.033 | −0.008 |
+
+**The seen gap widens monotonically with depth** (kingdom −0.04 → species −0.18): LoRA
+recovers coarse taxonomy but not fine-grained discrimination. Ruled out as the cause so far:
+LoRA rank (r=64 at matched rsLoRA scale ≈ r=32; r=64/α=64 diverged on step-size), and
+training duration is being tested (≤20ep constraint). Next levers: OneCycle + a swept peak
+LR (in progress), then MLP adaptation if needed. Unseen gaps are small in absolute terms
+(both near the floor) — closing unseen is the hyperbolic method's job, not LoRA's.
+
 ## How to read this baseline
 
 - **Use OUR numbers (the "ours" columns), not the paper's**, as the bar. They are the full-FT
