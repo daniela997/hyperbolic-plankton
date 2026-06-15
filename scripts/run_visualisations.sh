@@ -11,17 +11,17 @@ mkdir -p /scratch/daniela/horopca/
 
 # Define the exact tags used in the updated training script
 TAGS=(
-    "bioscan_B0_baseline"
-    "bioscan_C1_seltext_cumulative"
-    "bioscan_C2_selonly_cumulative"
-    "bioscan_C3_selonly_independent"
-    "bioscan_C4_clonly"
-    "bioscan_C5_selcumulative_clangle"
-    "bioscan_C6_selindependent_clangle"
-    # "bioscan_C7_selindependent_cldistance_masksame"
-    # "bioscan_C8_selcumulative_cldistance_masksame"
-    # "bioscan_C9_selindependent_clangle_masksame"
-    # "bioscan_C10_selcumulative_clangle_masksame"
+    # "bioscan_B0_baseline"
+    # "bioscan_C1_seltext_cumulative"
+    # "bioscan_C2_selonly_cumulative"
+    # "bioscan_C3_selonly_independent"
+    # "bioscan_C4_clonly"
+    # "bioscan_C5_selcumulative_clangle"
+    # "bioscan_C6_selindependent_clangle"
+    "bioscan_C7_selindependent_cldistance_masksame"
+    "bioscan_C8_selcumulative_cldistance_masksame"
+    "bioscan_C9_selindependent_clangle_masksame"
+    "bioscan_C10_selcumulative_clangle_masksame"
 )
 
 echo -e "\n================================================================="

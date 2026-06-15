@@ -344,6 +344,9 @@ def main():
                     help="adapt LoRA to the last N visual transformer blocks (ViT-B has 12; "
                          "HAC-B recipe = 4). Use 12 to adapt ALL blocks — lets LoRA correct "
                          "low-level features (relevant under a large domain shift like plankton)")
+    ap.add_argument("--lora-mlp", action="store_true",
+                    help="also adapt block MLP linears (mlp.c_fc/c_proj), not just attention "
+                         "— capacity on the feature-transform axis for fine-grained ranks")
     ap.add_argument("--lora-text-blocks", type=int, default=8,
                     help="adapt LoRA to the last N text transformer blocks (12 total; "
                          "HAC-B = 8). Use 12 for all blocks")
@@ -417,6 +420,7 @@ def main():
             adapt_visual_blocks=args.lora_visual_blocks,
             adapt_text_blocks=args.lora_text_blocks,
             reinit_final_ln=not args.no_reinit_final_ln,
+            include_mlp=args.lora_mlp,
         )
     model.to(device)
     if is_main():

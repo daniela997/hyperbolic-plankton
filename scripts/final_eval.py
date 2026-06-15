@@ -117,6 +117,8 @@ def main():
                     help="LoRA-adapted visual blocks (must match training)")
     ap.add_argument("--lora-text-blocks", type=int, default=8,
                     help="LoRA-adapted text blocks (must match training)")
+    ap.add_argument("--lora-mlp", action="store_true",
+                    help="MLP linears were LoRA-adapted (must match training)")
     ap.add_argument("--no-proj", action="store_true",
                     help="no visual/textual projection head (E0c architecture, euclidean)")
     ap.add_argument("--geometry", default="hyperbolic", choices=["hyperbolic", "euclidean"],
@@ -131,7 +133,8 @@ def main():
         model = apply_lora(model, r=args.lora_r,
                            alpha=args.lora_alpha if args.lora_alpha is not None else args.lora_r,
                            adapt_visual_blocks=args.lora_visual_blocks,
-                           adapt_text_blocks=args.lora_text_blocks)
+                           adapt_text_blocks=args.lora_text_blocks,
+                           include_mlp=args.lora_mlp)
     sd = torch.load(args.ckpt, map_location="cpu")
     model.load_state_dict(sd.get("model", sd), strict=False)
     model.to(device).eval()

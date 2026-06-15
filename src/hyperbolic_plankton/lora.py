@@ -22,8 +22,12 @@ __all__ = ["apply_lora", "unfreeze_backbone", "count_trainable"]
 _ATTN_SUBMODULES = ("q_proj", "k_proj", "v_proj", "proj")
 
 
-def _target_regex(n_vis: int, vis_last: int, n_txt: int, txt_last: int) -> str:
-    """A single anchored regex matching the attn linears in the last-N blocks of each
+_MLP_SUBMODULES = ("c_fc", "c_proj")  # open_clip ViT MLP linears (resblocks.{i}.mlp.{sub})
+
+
+def _target_regex(n_vis: int, vis_last: int, n_txt: int, txt_last: int,
+                  include_mlp: bool = False) -> str:
+    """A single anchored regex matching the adapted linears in the last-N blocks of each
     tower, against the FULL module path.
 
     Why a regex (not a name list): PEFT matches a `target_modules` *list* by name
@@ -32,15 +36,23 @@ def _target_regex(n_vis: int, vis_last: int, n_txt: int, txt_last: int) -> str:
     would wrongly also adapt visual blocks. A `str` target is matched with `re.fullmatch`
     against the full name, so anchoring `visual.transformer` vs a leading text path
     disambiguates the two towers.
+
+    `include_mlp` also adapts the block MLP linears (`mlp.c_fc`, `mlp.c_proj`) — capacity
+    on the feature-transform axis (distinct from attention), aimed at fine-grained
+    (deep-rank) discrimination that attention-only LoRA leaves on the table.
     """
     subs = "|".join(_ATTN_SUBMODULES)
     vis_blocks = "|".join(str(i) for i in range(max(0, n_vis - vis_last), n_vis))
     txt_blocks = "|".join(str(i) for i in range(max(0, n_txt - txt_last), n_txt))
     # PEFT matches `re.fullmatch` against pre-wrap names:
-    #   visual:  visual.transformer.resblocks.{i}.attn.{sub}
+    #   visual:  visual.transformer.resblocks.{i}.attn.{sub}  (+ .mlp.{sub} if include_mlp)
     #   text:    transformer.resblocks.{i}.attn.{sub}   (no 'visual.' segment)
-    vis = rf"visual\.transformer\.resblocks\.({vis_blocks})\.attn\.({subs})"
-    txt = rf"transformer\.resblocks\.({txt_blocks})\.attn\.({subs})"
+    part = rf"attn\.({subs})"
+    if include_mlp:
+        mlp = "|".join(_MLP_SUBMODULES)
+        part = rf"(?:attn\.({subs})|mlp\.({mlp}))"
+    vis = rf"visual\.transformer\.resblocks\.({vis_blocks})\.{part}"
+    txt = rf"transformer\.resblocks\.({txt_blocks})\.{part}"
     return rf"(?:{vis})|(?:{txt})"
 
 
@@ -52,6 +64,7 @@ def apply_lora(
     adapt_visual_blocks: int = 4,
     adapt_text_blocks: int = 8,
     reinit_final_ln: bool = True,
+    include_mlp: bool = False,
 ):
     """Swap MHA → split linears, wrap last-N blocks with LoRA, train the final LN.
 
@@ -70,7 +83,8 @@ def apply_lora(
 
     n_vis = len(clip.visual.transformer.resblocks)
     n_txt = len(clip.transformer.resblocks)
-    targets = _target_regex(n_vis, adapt_visual_blocks, n_txt, adapt_text_blocks)
+    targets = _target_regex(n_vis, adapt_visual_blocks, n_txt, adapt_text_blocks,
+                            include_mlp=include_mlp)
 
     cfg = LoraConfig(
         r=r,

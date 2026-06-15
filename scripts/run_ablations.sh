@@ -91,7 +91,7 @@ run_ablation "bioscan_C8_selcumulative_cldistance_masksame" \
 
 
 # ==============================================================================
-# C9 — SEL independent + CL distance masked
+# C9 — SEL independent + CL angle masked
 # ==============================================================================
 run_ablation "bioscan_C9_selindependent_clangle_masksame" \
     --lambda-cl 1.0 --lambda-sel 1.0 --contrastive angle --cl-mask same \
@@ -99,7 +99,7 @@ run_ablation "bioscan_C9_selindependent_clangle_masksame" \
 
 
 # ==============================================================================
-# C10 — SEL cumulative + CL distance masked
+# C10 — SEL cumulative + CL angle masked
 # ==============================================================================
 run_ablation "bioscan_C10_selcumulative_clangle_masksame" \
     --lambda-cl 1.0 --lambda-sel 1.0 --contrastive angle --cl-mask same \
