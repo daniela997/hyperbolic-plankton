@@ -300,10 +300,12 @@ def main():
     ap.add_argument("--wd", type=float, default=0.2)
     ap.add_argument("--optimizer", default="adamw", choices=["adamw", "adam"],
                     help="adamw=HAC; adam=Taxonomy-paper recipe")
-    ap.add_argument("--scheduler", default="warmupcos", choices=["warmupcos", "onecycle"],
+    ap.add_argument("--scheduler", default="warmupcos",
+                    choices=["warmupcos", "onecycle", "constant"],
                     help="warmupcos=HAC linear-warmup+cos^2 (default; lower LR converged "
                          "better here than onecycle@3e-4). onecycle=Taxonomy-paper OneCycleLR "
-                         "(--lr is then the PEAK).")
+                         "(--lr is then the PEAK). constant=flat LR, no decay (for --resume "
+                         "warm-start continuations).")
     ap.add_argument("--onecycle-pct-start", type=float, default=0.3)
     ap.add_argument("--onecycle-min-lr", type=float, default=1e-6)
     ap.add_argument("--curv-lr-scale", type=float, default=1.0,
@@ -380,6 +382,10 @@ def main():
                     help="torch.compile the backbone forward (model.clip) for ~1.2-1.8x. "
                          "Safest on the euclidean runs (no exp_map in the graph); may hit "
                          "graph breaks with the hyperbolic ops.")
+    ap.add_argument("--resume", default=None,
+                    help="warm-start: load trainable (adapter+final-LN+geometry) weights from "
+                         "this checkpoint before training. Optimizer/scheduler NOT restored "
+                         "(re-warm in a few hundred steps); pair with --scheduler constant.")
     ap.add_argument("--num-workers", type=int, default=6)
     ap.add_argument("--ckpt-every", type=int, default=2000)
     ap.add_argument("--log-every", type=int, default=50)
@@ -452,6 +458,14 @@ def main():
             reinit_final_ln=not args.no_reinit_final_ln,
             include_mlp=args.lora_mlp,
         )
+    if args.resume:
+        # Warm-start: load the trainable (adapter + final-LN + geometry) weights from a prior
+        # run. Optimizer/scheduler state are NOT restored (not saved) — for a constant-LR
+        # continuation that's fine: AdamW's moment estimates re-warm in a few hundred steps.
+        sd = torch.load(args.resume, map_location="cpu")
+        _, unexpected = model.load_state_dict(sd.get("model", sd), strict=False)
+        log(f"resumed adapter weights from {args.resume} "
+            f"(it={sd.get('it')}, {len(unexpected)} unexpected keys)")
     model.to(device)
     if is_main():
         c = count_trainable(model)
@@ -526,6 +540,10 @@ def main():
             pct_start=args.onecycle_pct_start, anneal_strategy="cos",
             div_factor=args.lr / args.onecycle_min_lr, final_div_factor=1.0,
         )
+    elif args.scheduler == "constant":
+        # Flat LR, no decay/warmup — for a constant-LR warm-start continuation (--resume),
+        # where the prior run already annealed and we just want more steps at a fixed low LR.
+        sched = torch.optim.lr_scheduler.LambdaLR(opt, lambda _step: 1.0)
     else:
         sched = LinearWarmupCosineDecayLR(opt, total_steps=total_iters, warmup_steps=warmup_steps)
     # bf16 autocast (Ampere): same speed as fp16 but fp32-range exponent, so gradients can't
