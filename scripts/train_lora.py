@@ -387,7 +387,10 @@ def main():
                          "this checkpoint before training. Optimizer/scheduler NOT restored "
                          "(re-warm in a few hundred steps); pair with --scheduler constant.")
     ap.add_argument("--num-workers", type=int, default=6)
-    ap.add_argument("--ckpt-every", type=int, default=2000)
+    ap.add_argument("--ckpt-every", type=int, default=None,
+                    help="checkpoint every N steps. Default (None) = once per epoch "
+                         "(derived from steps_per_epoch), so it* checkpoints land on epoch "
+                         "boundaries. _best.pt and _final.pt are always saved regardless.")
     ap.add_argument("--log-every", type=int, default=50)
     ap.add_argument("--eval-epochs", type=float, default=None,
                     help="periodic eval cadence in EPOCHS (e.g. 1.0 = once/epoch). Derives the "
@@ -516,8 +519,12 @@ def main():
     # steps_per_epoch so it means the same thing on bioscan and planktonzilla.
     if args.eval_epochs is not None:
         args.eval_every = max(1, round(args.eval_epochs * steps_per_epoch))
+    # checkpoint cadence: default (None) = once per epoch, so it* checkpoints land on epoch
+    # boundaries (the saves are otherwise step-multiples that drift off epochs).
+    if args.ckpt_every is None:
+        args.ckpt_every = steps_per_epoch
     log(f"steps/epoch={steps_per_epoch}  epochs={args.epochs}  total_steps={total_iters}  "
-        f"warmup={warmup_steps}  eval_every={args.eval_every}")
+        f"warmup={warmup_steps}  eval_every={args.eval_every}  ckpt_every={args.ckpt_every}")
 
     # Optimizer: AdamW (HAC) or Adam (Taxonomy-paper recipe — wd added to grad, not decoupled).
     # --curv-lr-scale (<1) puts the geometry scalars (curv, alphas) in a slower group so the
@@ -681,7 +688,8 @@ def main():
             t0 = time.perf_counter()  # don't count eval time in img/s
 
         if is_main() and it % args.ckpt_every == 0:
-            path = os.path.join(run_ckpt_dir, f"{args.tag}_it{it}.pt")
+            ep = it / steps_per_epoch
+            path = os.path.join(run_ckpt_dir, f"{args.tag}_ep{ep:g}_it{it}.pt")
             torch.save({"model": trainable_state_dict(model), "it": it, "args": vars(args)}, path)
             log(f"  saved {path}")
 
