@@ -44,11 +44,12 @@ run_hyperbolic() {
     echo -e "\n================================================================="
     echo "🚀 Starting hyperbolic run: $TAG"
     echo "================================================================="
-    # micro-bs 64 (NOT 128): SEL encodes text for all 7 ranks (~7x the text activations of
-    # the Euclidean run, which only encoded the cumulative `full` string), so 128 OOMs the
-    # 24GB A5000. accum 6 keeps the effective batch at 64*6*2 = 768, same as the Euclidean E0c.
+    # micro-bs/accum are passed PER CALL (effective batch = micro-bs * accum * 2 GPUs = 768).
+    # CL+SEL needs micro-bs 64 (SEL adds a 2nd 7-rank text encode -> 128 OOMs the 24GB A5000);
+    # CL-only skips SEL (forward_loss early-returns at lambda_sel==0), so it fits at 128/3 and
+    # runs ~2x fewer optimizer-step iterations -> finishes quicker.
     PYTHONPATH=src torchrun --nproc_per_node=2 --master_port=29557 scripts/train_lora.py \
-        --dataset planktonzilla --backbone clip --epochs 20 --micro-bs 64 --accum 6 \
+        --dataset planktonzilla --backbone clip --epochs 20 \
         --lr 1e-4 --wd 0.2 --optimizer adamw --scheduler warmupcos --warmup-frac 0.1 \
         --lora-r 32 --lora-visual-blocks 12 --lora-text-blocks 12 \
         --geometry hyperbolic --contrastive distance --cl-mask none \
@@ -60,10 +61,11 @@ run_hyperbolic() {
 }
 
 # H_cl — CL-only (lift, no entailment): isolates whether the hyperbolic contrastive alone
-# helps over Euclidean E0c, before SEL.
+# helps over Euclidean E0c, before SEL. Skips SEL -> fits micro-bs 128/accum 3.
 run_hyperbolic "planktonzilla_H_cl_lora_r32_20ep" \
-    --lambda-cl 1.0 --lambda-sel 0.0
+    --micro-bs 128 --accum 3 --lambda-cl 1.0 --lambda-sel 0.0
 
-# H_clsel — CL + SEL: the full hyperbolic method.
+# H_clsel — CL + SEL: the full hyperbolic method. SEL's 2nd 7-rank text encode needs the
+# smaller micro-bs 128->64 (accum 6 holds the effective batch at 768).
 run_hyperbolic "planktonzilla_H_clsel_lora_r32_20ep" \
-    --lambda-cl 1.0 --lambda-sel 1.0
+    --micro-bs 64 --accum 6 --lambda-cl 1.0 --lambda-sel 1.0

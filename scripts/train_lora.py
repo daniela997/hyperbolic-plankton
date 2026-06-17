@@ -266,6 +266,12 @@ def forward_loss(model, pixel_values, taxonomy_batch, lambda_sel, stats=None,
     # SEL is hyperbolic-only (entailment cones); the Euclidean baseline is CL-only.
     if euclidean:
         return lambda_cl * cl, cl.detach(), cl.new_zeros(())
+    # CL-only hyperbolic (lambda_sel==0): skip the SEL block entirely. It would otherwise do
+    # a SECOND encode_taxonomy (the independent per-rank T_r texts) + the entailment graph and
+    # contribute zero gradient — that extra 7-rank text pass is what forces micro-bs down, so
+    # skipping it lets a CL-only run use the larger Euclidean-sized batch.
+    if lambda_sel == 0.0:
+        return lambda_cl * cl, cl.detach(), cl.new_zeros(())
     # SEL — both intra (Eq.3) and inter (Eq.4) use the SAME text form. Paper-faithful is
     # INDEPENDENT per-rank `T_r` ('Rank: Value'): distinct per-rank concepts give SEL the
     # radial-separation gradient it needs (cumulative ranks are near-collinear). `cumulative`
