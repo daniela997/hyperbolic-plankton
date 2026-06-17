@@ -21,6 +21,7 @@ introduces larger error near the origin — see tests/test_lorentz.py for the co
 
 from __future__ import annotations
 
+import functools
 import math
 
 import torch
@@ -38,6 +39,25 @@ __all__ = [
 ]
 
 
+def _fp32(fn):
+    """Run a geometry primitive in fp32, disabling autocast. The acosh/sinh/asinh ops here
+    are numerically fragile: under bf16 (7-bit mantissa) a drifting curvature + growing
+    embeddings push acosh args into a regime that cascades to NaN (observed: curv -> NaN at
+    ~step 500 of a bf16 hyperbolic run). fp32 has the mantissa to stay stable; the cost is
+    tiny (these are a small fraction of FLOPs vs the backbone matmuls, which stay bf16).
+    No-op on CPU (autocast-to-fp32 unsupported there)."""
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        on_cuda = any(isinstance(a, Tensor) and a.is_cuda for a in args)
+        if on_cuda:
+            with torch.autocast("cuda", enabled=False):
+                args = tuple(a.float() if isinstance(a, Tensor) else a for a in args)
+                return fn(*args, **kwargs)
+        return fn(*args, **kwargs)
+    return wrapper
+
+
+@_fp32
 def time_component(x: Tensor, curv: float | Tensor = 1.0) -> Tensor:
     """Reconstruct the Lorentz time component from space components.
 
@@ -46,6 +66,7 @@ def time_component(x: Tensor, curv: float | Tensor = 1.0) -> Tensor:
     return torch.sqrt(1 / curv + torch.sum(x**2, dim=-1, keepdim=True))
 
 
+@_fp32
 def pairwise_inner(x: Tensor, y: Tensor, curv: float | Tensor = 1.0) -> Tensor:
     """Pairwise Lorentzian inner product <x_i, y_j>_L.
 
@@ -60,6 +81,7 @@ def pairwise_inner(x: Tensor, y: Tensor, curv: float | Tensor = 1.0) -> Tensor:
     return x @ y.T - x_time @ y_time.T
 
 
+@_fp32
 def pairwise_dist(
     x: Tensor, y: Tensor, curv: float | Tensor = 1.0, eps: float = 1e-8
 ) -> Tensor:
@@ -72,6 +94,7 @@ def pairwise_dist(
     return distance / curv**0.5
 
 
+@_fp32
 def exp_map0(x: Tensor, curv: float | Tensor = 1.0, eps: float = 1e-8) -> Tensor:
     """Exponential map at the origin: tangent vector -> point on hyperboloid.
 
@@ -86,6 +109,7 @@ def exp_map0(x: Tensor, curv: float | Tensor = 1.0, eps: float = 1e-8) -> Tensor
     return torch.sinh(sinh_input) * x / torch.clamp(rc_xnorm, min=eps)
 
 
+@_fp32
 def log_map0(x: Tensor, curv: float | Tensor = 1.0, eps: float = 1e-8) -> Tensor:
     """Logarithmic map at the origin: point on hyperboloid -> tangent vector.
 
@@ -99,6 +123,7 @@ def log_map0(x: Tensor, curv: float | Tensor = 1.0, eps: float = 1e-8) -> Tensor
     return distance0 * x / torch.clamp(rc_xnorm, min=eps)
 
 
+@_fp32
 def distance_from_origin(
     x: Tensor, curv: float | Tensor = 1.0, eps: float = 1e-8
 ) -> Tensor:
@@ -111,6 +136,7 @@ def distance_from_origin(
     return distance / curv**0.5
 
 
+@_fp32
 def half_aperture(
     x: Tensor,
     curv: float | Tensor = 1.0,
@@ -129,6 +155,7 @@ def half_aperture(
     return torch.asin(torch.clamp(asin_input, min=-1 + eps, max=1 - eps))
 
 
+@_fp32
 def oxy_angle(
     x: Tensor, y: Tensor, curv: float | Tensor = 1.0, eps: float = 1e-8
 ) -> Tensor:
@@ -150,6 +177,7 @@ def oxy_angle(
     return torch.acos(torch.clamp(acos_input, min=-1 + eps, max=1 - eps))
 
 
+@_fp32
 def pairwise_oxy_angle(
     x: Tensor, y: Tensor, curv: float | Tensor = 1.0, eps: float = 1e-8
 ) -> Tensor:
