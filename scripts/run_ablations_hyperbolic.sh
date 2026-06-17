@@ -44,8 +44,11 @@ run_hyperbolic() {
     echo -e "\n================================================================="
     echo "🚀 Starting hyperbolic run: $TAG"
     echo "================================================================="
+    # micro-bs 64 (NOT 128): SEL encodes text for all 7 ranks (~7x the text activations of
+    # the Euclidean run, which only encoded the cumulative `full` string), so 128 OOMs the
+    # 24GB A5000. accum 6 keeps the effective batch at 64*6*2 = 768, same as the Euclidean E0c.
     PYTHONPATH=src torchrun --nproc_per_node=2 --master_port=29557 scripts/train_lora.py \
-        --dataset planktonzilla --backbone clip --epochs 20 --micro-bs 128 --accum 3 \
+        --dataset planktonzilla --backbone clip --epochs 20 --micro-bs 64 --accum 6 \
         --lr 1e-4 --wd 0.2 --optimizer adamw --scheduler warmupcos --warmup-frac 0.1 \
         --lora-r 32 --lora-visual-blocks 12 --lora-text-blocks 12 \
         --geometry hyperbolic --contrastive distance --cl-mask none \
