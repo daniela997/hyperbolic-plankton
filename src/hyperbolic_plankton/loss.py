@@ -89,6 +89,10 @@ def _false_negative_mask(local_ids: torch.Tensor, all_ids: torch.Tensor, rank: i
     local_ids[i] == all_ids[j] and j is not i's own diagonal (i + B*rank)."""
     B = local_ids.shape[0]
     same = local_ids[:, None] == all_ids[None, :]            # [B, B*world]
+    # id -1 = unknown (None lineage): two unknowns are NOT the same class, so never mask
+    # them against each other (else we'd drop legitimate negatives). Only matters on ragged
+    # datasets like Planktonzilla; BIOSCAN is complete-to-species so has no -1.
+    same &= local_ids[:, None] != -1
     diag = torch.arange(B, device=local_ids.device) + B * rank
     same[torch.arange(B, device=local_ids.device), diag] = False  # keep the true positive
     return same
