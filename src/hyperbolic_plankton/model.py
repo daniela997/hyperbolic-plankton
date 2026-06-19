@@ -196,8 +196,17 @@ class HyperbolicCLIP(nn.Module):
             emb = torch.zeros(len(texts), self.embed_dim, device=self.device)
             if valid.any():
                 idx = valid.nonzero(as_tuple=True)[0]
-                sub = self.encode_text([texts[i] for i in idx.tolist()], project=project)
-                emb[idx] = sub.to(emb.dtype)
+                # Encode only the UNIQUE strings, then scatter back to every sample sharing
+                # them. Plankton batches are clade-imbalanced, so per-rank texts are ~80%
+                # duplicated (e.g. 64 samples share ~3 kingdom strings) — encoding uniques
+                # cuts the text-encoder forward (the SEL memory/compute cost that forces the
+                # smaller batch) ~5x. Mathematically identical to encoding each sample's text.
+                valid_texts = [texts[i] for i in idx.tolist()]
+                uniq = list(dict.fromkeys(valid_texts))  # stable-order unique
+                pos = {t: j for j, t in enumerate(uniq)}
+                inv = torch.tensor([pos[t] for t in valid_texts], device=self.device)
+                uemb = self.encode_text(uniq, project=project)  # [U, D]
+                emb[idx] = uemb[inv].to(emb.dtype)
             out[rank] = emb
             out[f"{rank}_valid"] = valid
         return out

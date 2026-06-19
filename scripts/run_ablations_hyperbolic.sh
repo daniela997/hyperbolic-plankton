@@ -54,7 +54,7 @@ run_hyperbolic() {
         --lora-r 32 --lora-visual-blocks 12 --lora-text-blocks 12 \
         --geometry hyperbolic --contrastive distance --cl-mask none \
         --sel-text independent --sel-tau 1.0 --sel-leak 0.0 --sel-uncertainty 0.0 \
-        --compile --eval-epochs 0.5 --eval-cap 50 \
+        --compile --eval-epochs 1.0 --eval-cap 50 \
         --wandb-project "$WANDB_PROJECT" \
         "$@" \
         --tag "$TAG"
@@ -65,7 +65,8 @@ run_hyperbolic() {
 run_hyperbolic "planktonzilla_H_cl_lora_r32_20ep" \
     --micro-bs 128 --accum 3 --lambda-cl 1.0 --lambda-sel 0.0
 
-# H_clsel — CL + SEL: the full hyperbolic method. SEL's 2nd 7-rank text encode needs the
-# smaller micro-bs 128->64 (accum 6 holds the effective batch at 768).
+# H_clsel — CL + SEL: the full hyperbolic method. Now fits micro-bs 128/accum 3 too:
+# encode_taxonomy deduplicates text (batches are ~80% duplicate per rank), so SEL's text
+# encode no longer forces the smaller batch — same speed as H_cl.
 run_hyperbolic "planktonzilla_H_clsel_lora_r32_20ep" \
-    --micro-bs 64 --accum 6 --lambda-cl 1.0 --lambda-sel 1.0
+    --micro-bs 128 --accum 3 --lambda-cl 1.0 --lambda-sel 1.0
