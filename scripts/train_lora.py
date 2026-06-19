@@ -412,6 +412,10 @@ def main():
     ap.add_argument("--tag", default="bioclip_lora")
     ap.add_argument("--wandb-project", default="hyperbolic-plankton")
     ap.add_argument("--no-wandb", action="store_true")
+    ap.add_argument("--seed", type=int, default=0,
+                    help="global seed for torch/numpy/random. Fixes LoRA init + dropout so "
+                         "ablations (E0c/H_cl/H_clsel) start from the SAME adapter weights — "
+                         "differences then reflect the variable under test, not init noise.")
     args = ap.parse_args()
 
     # wandb-sweep support: when launched by a `wandb agent`, the agent sets WANDB_SWEEP_ID
@@ -430,6 +434,16 @@ def main():
             f"{k}{getattr(args, k)}" for k in ("lr", "lora_r", "lora_alpha", "epochs")
             if getattr(args, k, None) is not None)
         _sweep_run.name = args.tag
+
+    # Seed torch/numpy/random (same seed on every DDP rank so all ranks build the IDENTICAL
+    # LoRA init — the random lora_A and dropout are otherwise unseeded, so each run/ablation
+    # started from different adapter weights, confounding E0c/H_cl/H_clsel comparisons with
+    # init noise). The DistributedSampler keeps its own seed=0 for per-rank data sharding.
+    import random
+    random.seed(args.seed)
+    np.random.seed(args.seed)
+    torch.manual_seed(args.seed)
+    torch.cuda.manual_seed_all(args.seed)
 
     # Enable TF32 matmuls on Ampere (A5000) — free ~5-15% on the fp32 portions (projector,
     # LoRA, the forced-fp32 exp_map), no accuracy concern at this scale.
