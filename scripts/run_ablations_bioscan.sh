@@ -1,19 +1,16 @@
 #!/bin/bash
-# BIOSCAN ablation ladder — the DEVELOPMENT testbed (complete-to-species taxonomy, ~2.5h/run
-# vs ~20h on Planktonzilla). Develop here, then confirm only the WINNER + Euclidean baseline
-# on Planktonzilla. 2 GPUs per run, sequential.
+# BIOSCAN ablation ladder — the DEVELOPMENT testbed (complete-to-species, ~2.5h/run vs ~20h
+# on Planktonzilla). Full C0-C10 grid + Euclidean baseline. Develop here; confirm only the
+# WINNER + Euclidean baseline on Planktonzilla. 2 GPUs per run, sequential (~30h total).
 #
-# ONE shared recipe (the Euclidean-campaign learnings) so every difference reflects the LOSS
-# under test, not tuning: warmupcos / lr 1e-4 / r32 / seed 0 / bf16. NOT the old paper-faithful
-# adam/onecycle/lr5e-5/r128 in run_ablations.sh.
+# ONE shared recipe so every difference reflects the LOSS under test, not tuning:
+# warmupcos / lr 1e-4 / r32 / seed 0 / bf16 (the Euclidean-campaign learnings). This SUPERSEDES
+# the old run_ablations.sh recipe (adam/onecycle/lr5e-5/r128); the June C7/C9/C10 runs used
+# that old recipe and are NOT comparable, so the whole grid re-runs fresh.
 #
-# The 5 flag-flip configs (all already-implemented flags). Novel losses (random-truncation)
-# are added later as separate runs once developed.
-#   E   Euclidean baseline      --geometry euclidean (flat CLIP InfoNCE, no SEL) — the control
-#   H1  hyperbolic CL-only      --lambda-sel 0 (lift, no entailment)
-#   H2  hyperbolic CL+SEL       the Taxonomy-paper method (distance CL + independent SEL)
-#   H3  + angle CL              --contrastive angle (radius-free CL, SEL-aligned)
-#   H4  + false-negative mask   --cl-mask same (suppress same-class off-diagonal negatives)
+# The grid (B0 = the Taxonomy-paper method; C1-C10 vary one axis each):
+#   axes: lambda_cl/sel (CL-only / SEL-only / both), contrastive (distance/angle),
+#         sel-text (independent/cumulative), cl-mask (none/same = false-negative suppression)
 #
 # Read results: PYTHONPATH=src python scripts/final_eval.py --ckpt <dir>/<tag>_best.pt \
 #   --dataset bioscan --backbone clip --lora --lora-r 32 --lora-visual-blocks 12 \
@@ -36,28 +33,63 @@ run() {
         --tag "$TAG"
 }
 
-# E — Euclidean baseline (the LoRA-vs-full-FT + flat-vs-hyperbolic control)
+# E — Euclidean baseline (LoRA-vs-full-FT + flat-vs-hyperbolic control). No SEL (forced).
 run "bioscan_E_euclidean_r32" \
-    --geometry euclidean --lambda-cl 1.0
+    --geometry euclidean --lambda-cl 1.0 --cl-mask none
 
-# H1 — hyperbolic CL-only (lift, no entailment)
-run "bioscan_H1_clonly_r32" \
-    --geometry hyperbolic --lambda-cl 1.0 --lambda-sel 0.0 \
-    --contrastive distance
+# B0 — baseline = the Taxonomy-paper method (CL distance + SEL independent, lambda_cl=sel=1)
+run "bioscan_B0_baseline_r32" \
+    --lambda-cl 1.0 --lambda-sel 1.0 --contrastive distance --cl-mask none \
+    --sel-text independent --sel-tau 1.0 --sel-leak 0.0 --sel-uncertainty 0.0
 
-# H2 — hyperbolic CL + SEL (the Taxonomy-paper method)
-run "bioscan_H2_clsel_r32" \
-    --geometry hyperbolic --lambda-cl 1.0 --lambda-sel 1.0 \
-    --contrastive distance --sel-text independent --cl-mask none
+# C1 — SEL text cumulative (vs B0's independent)
+run "bioscan_C1_seltext_cumulative_r32" \
+    --lambda-cl 1.0 --lambda-sel 1.0 --contrastive distance --cl-mask none \
+    --sel-text cumulative --sel-tau 1.0 --sel-leak 0.0 --sel-uncertainty 0.0
 
-# H3 — + angle CL (radius-free contrastive)
-run "bioscan_H3_clsel_angle_r32" \
-    --geometry hyperbolic --lambda-cl 1.0 --lambda-sel 1.0 \
-    --contrastive angle --sel-text independent --cl-mask none
+# C2 — SEL-only, cumulative (no contrastive)
+run "bioscan_C2_selonly_cumulative_r32" \
+    --lambda-cl 0.0 --lambda-sel 1.0 --contrastive distance --cl-mask none \
+    --sel-text cumulative --sel-tau 1.0 --sel-leak 0.0 --sel-uncertainty 0.0
 
-# H4 — + false-negative mask (suppress same-class off-diagonal negatives)
-run "bioscan_H4_clsel_masksame_r32" \
-    --geometry hyperbolic --lambda-cl 1.0 --lambda-sel 1.0 \
-    --contrastive distance --sel-text independent --cl-mask same
+# C3 — SEL-only, independent (no contrastive)
+run "bioscan_C3_selonly_independent_r32" \
+    --lambda-cl 0.0 --lambda-sel 1.0 --contrastive distance --cl-mask none \
+    --sel-text independent --sel-tau 1.0 --sel-leak 0.0 --sel-uncertainty 0.0
 
-echo -e "\n✅ BIOSCAN ablation ladder complete."
+# C4 — CL-only (no SEL) = the hyperbolic lift without entailment
+run "bioscan_C4_clonly_r32" \
+    --lambda-cl 1.0 --lambda-sel 0.0 --contrastive distance --cl-mask none \
+    --sel-text independent --sel-tau 1.0 --sel-leak 0.0 --sel-uncertainty 0.0
+
+# C5 — SEL cumulative + CL angle
+run "bioscan_C5_selcumulative_clangle_r32" \
+    --lambda-cl 1.0 --lambda-sel 1.0 --contrastive angle --cl-mask none \
+    --sel-text cumulative --sel-tau 1.0 --sel-leak 0.0 --sel-uncertainty 0.0
+
+# C6 — SEL independent + CL angle
+run "bioscan_C6_selindependent_clangle_r32" \
+    --lambda-cl 1.0 --lambda-sel 1.0 --contrastive angle --cl-mask none \
+    --sel-text independent --sel-tau 1.0 --sel-leak 0.0 --sel-uncertainty 0.0
+
+# C7 — SEL independent + CL distance + false-negative mask
+run "bioscan_C7_selindependent_cldistance_masksame_r32" \
+    --lambda-cl 1.0 --lambda-sel 1.0 --contrastive distance --cl-mask same \
+    --sel-text independent --sel-tau 1.0 --sel-leak 0.0 --sel-uncertainty 0.0
+
+# C8 — SEL cumulative + CL distance + false-negative mask
+run "bioscan_C8_selcumulative_cldistance_masksame_r32" \
+    --lambda-cl 1.0 --lambda-sel 1.0 --contrastive distance --cl-mask same \
+    --sel-text cumulative --sel-tau 1.0 --sel-leak 0.0 --sel-uncertainty 0.0
+
+# C9 — SEL independent + CL angle + false-negative mask
+run "bioscan_C9_selindependent_clangle_masksame_r32" \
+    --lambda-cl 1.0 --lambda-sel 1.0 --contrastive angle --cl-mask same \
+    --sel-text independent --sel-tau 1.0 --sel-leak 0.0 --sel-uncertainty 0.0
+
+# C10 — SEL cumulative + CL angle + false-negative mask
+run "bioscan_C10_selcumulative_clangle_masksame_r32" \
+    --lambda-cl 1.0 --lambda-sel 1.0 --contrastive angle --cl-mask same \
+    --sel-text cumulative --sel-tau 1.0 --sel-leak 0.0 --sel-uncertainty 0.0
+
+echo -e "\n✅ BIOSCAN C0-C10 + Euclidean ablation ladder complete."
