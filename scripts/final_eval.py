@@ -12,6 +12,7 @@ is a seeded subsample for monitoring only.
 
 import argparse
 import json
+import os
 
 import numpy as np
 import torch
@@ -25,7 +26,9 @@ from hyperbolic_plankton.model import HyperbolicCLIP
 
 CACHE = "/scratch/daniela/planktonzilla_cache/plankton"
 SPLIT_DIR = "/scratch/daniela/hyperbolic_plankton_splits"
-BIOSCAN_HDF5 = "/scratch/daniela/bioscan1m/data/BIOSCAN_1M/split_data/BioScan_data_in_splits.hdf5"
+BIOSCAN_HDF5 = os.environ.get(
+    "BIOSCAN_HDF5",
+    "/scratch/daniela/bioscan1m/data/BIOSCAN_1M/split_data/BioScan_data_in_splits.hdf5")
 
 
 def _present_classes(ds) -> list[str]:

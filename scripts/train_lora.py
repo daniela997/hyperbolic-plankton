@@ -124,7 +124,11 @@ def _build_eval_sets(cache, args):
     }
 
 
-BIOSCAN_HDF5 = "/scratch/daniela/bioscan1m/data/BIOSCAN_1M/split_data/BioScan_data_in_splits.hdf5"
+# Override on another machine with `export BIOSCAN_HDF5=/path/to/BioScan_data_in_splits.hdf5`
+# (the CLIBD pre-split file — see docs/bioscan-fullft-clip-baseline.md for the download).
+BIOSCAN_HDF5 = os.environ.get(
+    "BIOSCAN_HDF5",
+    "/scratch/daniela/bioscan1m/data/BIOSCAN_1M/split_data/BioScan_data_in_splits.hdf5")
 
 
 def _bioscan_classes(group: str) -> list[str]:
