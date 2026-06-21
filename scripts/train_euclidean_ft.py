@@ -82,7 +82,14 @@ def main():
     ap.add_argument("--tag", default="euclidean_ft")
     ap.add_argument("--wandb-project", default="hyperbolic-plankton")
     ap.add_argument("--no-wandb", action="store_true")
+    ap.add_argument("--seed", type=int, default=0,
+                    help="global seed (torch/numpy/random), same on every DDP rank")
     args = ap.parse_args()
+    import random
+    random.seed(args.seed)
+    np.random.seed(args.seed)
+    torch.manual_seed(args.seed)
+    torch.cuda.manual_seed_all(args.seed)
     torch.set_float32_matmul_precision("high")  # TF32 on Ampere (A5000) — free fp32 speedup
     # Fixed for the full-FT euclidean baseline: flat cosine InfoNCE, no SEL. These let us
     # reuse train_lora.forward_loss / _run_periodic_eval unchanged.
