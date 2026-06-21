@@ -353,7 +353,9 @@ def main():
     ap.add_argument("--freeze-curv", action="store_true",
                     help="hold curvature fixed at init (removes the curvature-collapse "
                          "shortcut so SEL must update embeddings, not shrink cones)")
-    ap.add_argument("--lora-r", type=int, default=128)
+    ap.add_argument("--lora-r", "--lora_r", type=int, default=128,
+                    help="LoRA rank. Underscore alias --lora_r accepted so wandb sweeps "
+                         "(which emit the param key 'lora_r') work.")
     ap.add_argument("--lora-alpha", type=int, default=None,
                     help="LoRA alpha (default: =r). With use_rslora the update scale is "
                          "alpha/sqrt(r), so to ADD CAPACITY (raise r) without changing the "
