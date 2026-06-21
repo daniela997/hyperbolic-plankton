@@ -39,7 +39,7 @@ command:
   - ${env}
   - /scratch/daniela/miniconda3/envs/dino_plankton/bin/torchrun
   - --nproc_per_node=2
-  - --master_port=29556
+  - --master_port=29558
   - ${program}
   - --dataset=bioscan
   - --backbone=clip
