@@ -1,0 +1,64 @@
+# Recipe sweep on the B0 hyperbolic config (Taxonomy-paper method) — find a good
+# optimizer/wd/lr/scheduler/rank, since the RECIPE (not the loss) has dominated results.
+#
+# FOCUSED around the known-good June recipe (adam/wd1e-4/onecycle/lr5e-5 -> ~0.045), not a
+# broad grid: narrower ranges = fewer wasted trials, higher chance of a clean win.
+# Metric = SEEN species_f1: large (~0.3-0.6) and low-noise on BIOSCAN, so bayes ranks recipes
+# reliably (unseen ~0.03-0.05 is too noisy to optimize). We verify the winner on unseen after.
+# 30-epoch runs (~1.4h) for fast ranking; re-run the winner at full 80ep. fp16 (bf16 reverted).
+#
+#   cd /home/daniela/mine/hyperbolic-plankton
+#   wandb sweep --project hyperbolic-plankton scripts/sweeps/b0_recipe_bayes.yaml
+#   PYTHONPATH=src CUDA_VISIBLE_DEVICES=0 wandb agent <entity>/hyperbolic-plankton/<sweep_id>
+#   PYTHONPATH=src CUDA_VISIBLE_DEVICES=1 wandb agent <entity>/hyperbolic-plankton/<sweep_id>
+
+program: scripts/train_lora.py
+method: bayes
+metric:
+  name: eval/seen/species_f1
+  goal: maximize
+
+parameters:
+  optimizer:
+    values: [adam, adamw]
+  wd:
+    values: [1.0e-4, 1.0e-3, 1.0e-2]
+  lr:
+    distribution: log_uniform_values
+    min: 3.0e-5
+    max: 1.0e-4
+  scheduler:
+    values: [warmupcos, onecycle]
+  lora_r:
+    values: [32, 64, 128]
+
+command:
+  # torchrun so each trial uses BOTH GPUs (eff batch 768 = the final 2-GPU ladder, so the
+  # winning LR transfers with no rescaling). Trials run sequentially; same wall-clock as 2
+  # single-GPU agents but cleaner. Run ONE agent (it owns both GPUs per trial).
+  - ${env}
+  - /scratch/daniela/miniconda3/envs/dino_plankton/bin/torchrun
+  - --nproc_per_node=2
+  - --master_port=29556
+  - ${program}
+  - --dataset=bioscan
+  - --backbone=clip
+  - --epochs=30
+  - --micro-bs=128
+  - --accum=3
+  - --lora-visual-blocks=12
+  - --lora-text-blocks=12
+  - --warmup-frac=0.1
+  - --onecycle-pct-start=0.3
+  - --onecycle-min-lr=1e-6
+  - --geometry=hyperbolic
+  - --lambda-cl=1.0
+  - --lambda-sel=1.0
+  - --contrastive=distance
+  - --sel-text=independent
+  - --cl-mask=none
+  - --seed=0
+  - --compile
+  - --eval-epochs=1.0
+  - --wandb-project=hyperbolic-plankton
+  - ${args}   # swept: optimizer, wd, lr, scheduler, lora_r
