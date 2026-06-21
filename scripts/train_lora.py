@@ -573,9 +573,7 @@ def main():
         sched = torch.optim.lr_scheduler.LambdaLR(opt, lambda _step: 1.0)
     else:
         sched = LinearWarmupCosineDecayLR(opt, total_steps=total_iters, warmup_steps=warmup_steps)
-    # bf16 autocast (Ampere): same speed as fp16 but fp32-range exponent, so gradients can't
-    # underflow -> no GradScaler needed. Also steadier for the contrastive logits / geometry
-    # ops than fp16. (The exp_map stays force-fp32 in model.py regardless.)
+    scaler = torch.amp.GradScaler("cuda")
 
     # wandb (rank 0 only): config = all hyperparams incl lambda_sel + effective batch.
     wb = None
@@ -634,7 +632,7 @@ def main():
             )
             last_micro = micro == args.accum - 1
             step_stats = sel_terms if (is_log_iter and last_micro and is_main()) else None
-            with sync_ctx, torch.amp.autocast("cuda", dtype=torch.bfloat16):
+            with sync_ctx, torch.amp.autocast("cuda"):
                 loss, cl, sel = forward_loss(
                     ddp_model, pixel_values, taxonomy_batch, args.lambda_sel,
                     stats=step_stats, sel_indep=(args.sel_text == "independent"),
@@ -644,12 +642,13 @@ def main():
                     lambda_cl=args.lambda_cl, geometry=args.geometry,
                 )
                 loss = loss / args.accum
-            loss.backward()
+            scaler.scale(loss).backward()
             run_loss += loss.item() * args.accum
             run_cl += cl.item()
             run_sel += sel.item()
 
-        opt.step()
+        scaler.step(opt)
+        scaler.update()
         sched.step()
         model.clamp_params()
         it += 1
