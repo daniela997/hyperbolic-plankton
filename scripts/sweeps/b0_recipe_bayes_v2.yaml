@@ -1,0 +1,64 @@
+# B0 recipe sweep v2 — WIDENED after v1 (sweep a6l07tbj) hit its edges. v1 finding: r128
+# dominates (r32/64 at the bottom), lr wants the TOP of [3e-5,1e-4] (~9e-5 best), wd=1e-2
+# beats 1e-4, optimizer/scheduler barely matter. Best v1: seen 0.57 / unseen 0.06 (beats
+# June ~0.40/0.045). v2 extends lr up to 1e-3 (was pinned at the 1e-4 ceiling) and runs 50ep.
+#
+# Changes vs v1: lr [3e-5,1e-4] -> [5e-5,1e-3] (full decade above the v1 best; log-uniform
+# bayes samples it and learns which region works); epochs 30 -> 50. Still sweeps rank
+# {32,64,128} (rank/lr couple, so the best rank could shift with wider lr). Same project so
+# v1+v2 results pool together.
+#
+# NOTE: high lr (toward 1e-3) is NaN-prone for hyperbolic (curvature instability) — those
+# trials will log ~0 and bayes avoids them. The crash-resilient nan handling is fine; a NaN
+# trial just scores 0, it doesn't abort the agent.
+#
+#   wandb sweep --project hyperbolic-plankton-sweep scripts/sweeps/b0_recipe_bayes_v2.yaml
+#   tmux new-session -d -s sweep2 'PYTHONPATH=src .../wandb agent uofg/hyperbolic-plankton-sweep/<id> 2>&1 | tee /tmp/sweep2.log'
+
+program: scripts/train_lora.py
+method: bayes
+metric:
+  name: eval/seen/species_f1
+  goal: maximize
+
+parameters:
+  optimizer:
+    values: [adam, adamw]
+  wd:
+    values: [1.0e-4, 1.0e-3, 1.0e-2]
+  lr:
+    distribution: log_uniform_values
+    min: 5.0e-5
+    max: 1.0e-3
+  scheduler:
+    values: [warmupcos, onecycle]
+  lora_r:
+    values: [32, 64, 128]
+
+command:
+  - ${env}
+  - /scratch/daniela/miniconda3/envs/dino_plankton/bin/torchrun
+  - --nproc_per_node=2
+  - --master_port=29556
+  - ${program}
+  - --dataset=bioscan
+  - --backbone=clip
+  - --epochs=50
+  - --micro-bs=128
+  - --accum=3
+  - --lora-visual-blocks=12
+  - --lora-text-blocks=12
+  - --warmup-frac=0.1
+  - --onecycle-pct-start=0.3
+  - --onecycle-min-lr=1e-6
+  - --geometry=hyperbolic
+  - --lambda-cl=1.0
+  - --lambda-sel=1.0
+  - --contrastive=distance
+  - --sel-text=independent
+  - --cl-mask=none
+  - --seed=0
+  - --compile
+  - --eval-epochs=1.0
+  - --wandb-project=hyperbolic-plankton-sweep
+  - ${args}   # swept: optimizer, wd, lr, scheduler, lora_r
