@@ -60,5 +60,5 @@ command:
   - --seed=0
   - --compile
   - --eval-epochs=1.0
-  - --wandb-project=hyperbolic-plankton
+  - --wandb-project=hyperbolic-plankton-sweep
   - ${args}   # swept: optimizer, wd, lr, scheduler, lora_r
