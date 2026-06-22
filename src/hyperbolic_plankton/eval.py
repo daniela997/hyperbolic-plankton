@@ -255,7 +255,7 @@ def class_set_from_dataset(ds) -> list[str]:
 
 
 @torch.no_grad()
-def geometry_stats(model, taxonomy_batch, ranks=RANKS) -> dict:
+def geometry_stats(model, taxonomy_batch, ranks=RANKS, indep=True) -> dict:
     """Per-rank geometric diagnostics for understanding training dynamics.
 
     Encodes the batch's per-rank taxonomy text into the hyperboloid and reports, for each
@@ -269,12 +269,15 @@ def geometry_stats(model, taxonomy_batch, ranks=RANKS) -> dict:
         the fraction of valid pairs where the child lies INSIDE the parent's cone
         (oxy_angle ≤ half_aperture) — the direct measure of entailment being learned,
         independent of the loss value.
-    Returns a flat dict keyed `geom/{rank}/radius`, `geom/{rank}/aperture`,
-    `geom/{parent}->{child}/entail_ok`, plus `geom/curv`.
+
+    `indep` MUST match the SEL text form training used (`--sel-text`): SEL arranges cones on
+    the INDEPENDENT per-rank texts (`indep=True`, the default) or the cumulative ones. Before
+    this was always cumulative, so entail_ok measured entailment on text the independent-SEL
+    runs never optimised — reading ~0 spuriously. Now it measures the text SEL actually trained.
     """
     was_training = model.training
     model.eval()
-    embs = model.encode_taxonomy(taxonomy_batch)  # {rank: [B,D], rank_valid: [B]}
+    embs = model.encode_taxonomy(taxonomy_batch, indep=indep)  # {rank: [B,D], rank_valid: [B]}
     curv = model.curvature
     out: dict = {"geom/curv": float(curv)}
 

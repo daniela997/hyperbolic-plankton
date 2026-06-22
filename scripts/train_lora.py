@@ -184,7 +184,7 @@ def _run_periodic_eval(model, eval_sets, num_workers, sel_indep=True, ranks=RANK
     pixel_values, taxonomy_batch, _ = TaxonomyCollator(model.preprocess, ranks=ranks)(
         eval_sets["geom_items"]
     )
-    out.update(geometry_stats(model, taxonomy_batch, ranks=ranks))
+    out.update(geometry_stats(model, taxonomy_batch, ranks=ranks, indep=sel_indep))
 
     # per-term SEL (intra per edge + inter, pos/neg components) for understanding which
     # part of the loss is active — logged under loss_terms/*. Use the SAME text form as
