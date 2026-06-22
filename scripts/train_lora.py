@@ -229,7 +229,7 @@ def log(msg):
 
 def forward_loss(model, pixel_values, taxonomy_batch, lambda_sel, stats=None,
                  sel_indep=True, contrastive="distance", ranks=RANKS,
-                 sel_tau=1.0, sel_leak=0.0, sel_uncertainty=0.0, cl_mask="none", lambda_cl=1.0,
+                 sel_tau=1.0, sel_leak=0.0, sel_uncertainty=0.0, sel_margin=0.0, cl_mask="none", lambda_cl=1.0,
                  geometry="hyperbolic"):
     """lambda_cl*contrastive(img, deepest_text) + lambda_sel*SEL. `model` may be a DDP
     wrapper; geometry helpers live on the underlying module.
@@ -283,7 +283,7 @@ def forward_loss(model, pixel_values, taxonomy_batch, lambda_sel, stats=None,
     sel_embs = core.encode_taxonomy(taxonomy_batch, indep=True) if sel_indep else cum_embs
     sel, intra, inter = stacked_entailment_loss(
         img, cum_embs, taxonomy_batch, ranks, curv, stats=stats, sel_text_embs=sel_embs,
-        tau=sel_tau, leak=sel_leak, lam_u=sel_uncertainty,
+        tau=sel_tau, leak=sel_leak, lam_u=sel_uncertainty, cone_margin=sel_margin,
     )
     if stats is not None:
         stats["loss_terms/sel_intra"] = intra.detach().item()
@@ -349,6 +349,13 @@ def main():
                     help="Radius/uncertainty penalty weight: `lam_u*softplus(-||parent||)` "
                          "pushes parents off the origin so children end up deeper, and gives "
                          "ragged leaves depth-appropriate radius (UNCHA Eq.7/15). 0=off")
+    ap.add_argument("--sel-margin", type=float, default=0.0,
+                    help="Cone-CONTAINMENT weight (our term, not UNCHA): SEL-intra hinge += "
+                         "w*psi(child), requiring the child rank's WHOLE cone inside the "
+                         "parent's (angle+psi(child)<=psi(parent)), not just its apex. Restores "
+                         "transitive entailment (image in species => in all ancestors) and "
+                         "self-induces radial spread (only satisfiable at psi(child)<psi(parent) "
+                         "= child deeper). Text-text only; sel_inter unaffected. 0=off")
     ap.add_argument("--sel-text", default="independent", choices=["independent", "cumulative"],
                     help="text form for BOTH SEL terms (intra Eq.3 + inter Eq.4). Paper uses "
                          "independent per-rank embeddings T_r ('Rank: Value') for SEL and the "
@@ -644,7 +651,8 @@ def main():
                     stats=step_stats, sel_indep=(args.sel_text == "independent"),
                     contrastive=args.contrastive, ranks=ranks,
                     sel_tau=args.sel_tau, sel_leak=args.sel_leak,
-                    sel_uncertainty=args.sel_uncertainty, cl_mask=args.cl_mask,
+                    sel_uncertainty=args.sel_uncertainty, sel_margin=args.sel_margin,
+                    cl_mask=args.cl_mask,
                     lambda_cl=args.lambda_cl, geometry=args.geometry,
                 )
                 loss = loss / args.accum
