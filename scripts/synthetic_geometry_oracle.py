@@ -46,6 +46,47 @@ def rand_dir(seed: int | None = None) -> torch.Tensor:
     return torch.randn(DIM)
 
 
+def child_at_angle(base: torch.Tensor, theta: float, radius: float, curv: float = 1.0,
+                   seed: int = 777) -> torch.Tensor:
+    """Node at geodesic `radius`, offset by EXACTLY `theta` radians from unit `base`.
+
+    NOTE: do NOT approximate an angular offset by `base + eps*randn` — a 64-dim eps=0.05
+    perturbation is ~23°, not "tiny" (the bug that wrecked the first Block 1). Rotate by a
+    true angle in the (base, perp) plane instead.
+    """
+    b = base / base.norm()
+    torch.manual_seed(seed)
+    perp = torch.randn(DIM)
+    perp = perp - (perp @ b) * b
+    perp = perp / perp.norm()
+    d = math.cos(theta) * b + math.sin(theta) * perp
+    return node(d, radius, curv)
+
+
+def oxy_over_aperture_table():
+    """The master relationship: oxy_angle(parent,child) / ψ(parent) as parent radius grows.
+
+    Ratio ≤ 1 ⇒ child fits in parent cone. Both shrink with radius, but oxy_angle shrinks
+    SLOWER than ψ, so the ratio EXPLODES with depth — deep cones can't contain off-axis
+    children however far out you push them. This is the structural separability-vs-containment
+    finding: geodesic separability is free at large radius, cone-containment is not.
+    """
+    c = 1.0
+    base = rand_dir(20); base = base / base.norm()
+    print("\n=== MASTER: oxy_angle / ψ(parent) vs parent radius (≤1 = child fits) ===")
+    print("    (child at fixed angular offset θ, radius = rp+1.5; rises ≫1 ⇒ containment fails)")
+    print(f"    {'rp':>5s} {'ψ(parent)':>10s} {'θ=1°':>8s} {'θ=0.2°':>8s} {'θ=0.05°':>8s}")
+    for rp in (0.5, 1.0, 2.0, 3.0, 4.0):
+        p = node(base, rp, c)
+        psi = L.half_aperture(p, c).item()
+        rats = [L.oxy_angle(p, child_at_angle(base, math.radians(t), rp + 1.5, c), c).item() / psi
+                for t in (1.0, 0.2, 0.05)]
+        print(f"    {rp:5.1f} {psi:10.4f} {rats[0]:8.2f} {rats[1]:8.2f} {rats[2]:8.2f}")
+    print("    → ratio EXPLODES with depth: deep ranks demand near-perfect co-axiality.")
+    print("      Forcing containment (--sel-margin) at depth ⇒ collapses species onto the axis")
+    print("      (= C5/C10 angular collapse). Containment and angular-separability are at odds.")
+
+
 def slack(parent, child, curv, min_radius=0.1):
     """ψ(parent) − ψ(child) − oxy_angle(parent, child): ≥0 ⇒ child's WHOLE cone nests in parent."""
     ang = L.oxy_angle(parent, child, curv)
@@ -120,10 +161,11 @@ def test_ideal_hierarchy():
         s = slack(ra, rb, c).item()
         print(f"      {a:7s}→{b:8s} slack={s:+.4f}  {'✅' if s >= -1e-3 else '❌ pokes out'}")
 
-    # many species: spread ANGULARLY at the species shell → separability, all under one order cone
+    # many species: separated RADIALLY (push out, tiny TRUE angular offset) — the hyperbolic way.
+    # Uses controlled angles (child_at_angle), not the eps*randn bug.
     order = node(base, radii[0], c)
-    sp_dirs = [base + 0.6 * rand_dir(30 + i) for i in range(n_species)]
-    species = torch.cat([node(d, radii[-1], c) for d in sp_dirs])
+    species = torch.cat([child_at_angle(base, math.radians(0.3), radii[-1] + 0.3 * i, c, seed=30 + i)
+                         for i in range(n_species)])
     # transitivity: is each species inside the ORDER cone?
     ang = L.oxy_angle(order.expand(n_species, -1), species, c)
     in_order = (ang <= L.half_aperture(order, c)).float().mean().item()
@@ -204,6 +246,7 @@ def test_curvature_sweep():
 
 if __name__ == "__main__":
     test_probe_correctness()
+    oxy_over_aperture_table()
     test_ideal_hierarchy()
     test_failure_modes()
     test_curvature_sweep()
