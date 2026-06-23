@@ -69,7 +69,8 @@ def diagnose(path, dataset, n, device):
     n = min(n, len(ds))
     items = [ds[i] for i in range(n)]
     pv, tb, _ = TaxonomyCollator(model.preprocess, ranks=ranks)(items)
-    img = model.encode_image(pv.to(device))
+    img = torch.cat([model.encode_image(pv[i:i + 256].to(device))
+                     for i in range(0, pv.shape[0], 256)])  # batch to fit 24GB
     txt = model.encode_taxonomy(tb, indep=indep)  # config's trained SEL text form
 
     tag = path.split("/")[-1].replace("_final.pt", "").replace("_best.pt", "")
