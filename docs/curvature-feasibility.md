@@ -100,15 +100,44 @@ Practical consequence: because `c` barely drifts from init (C2: 0 drift; others 
 a 4× init. So `learn_curv=True` with `curv_init=4` is expected to hold the feasible regime; pinning
 (`learn_curv=False`) is the stricter control.
 
-## Prediction / proposed experiment
+## External corroboration: "Accept the Modality Gap" (2024)
 
-Initialise curvature high (`curv_init ≥ 4`, e.g. 4–8). This (a) starts training in the feasible
-regime and (b) shifts the learnable clamp to `[0.4, 40]+`, so the model can stay there. Test on B0:
+This paper independently observed the SAME curvature mechanism, with numbers that match ours:
 
-- **If ranks spread radially and `c` stays ≥ 4** → curvature initialisation was the gap; expect the
-  species-in-ancestor-cone transitivity (B0: 0.94→0.49→0.05→0.00) to lift.
-- **If it still origin-collapses** → the loss landscape needs a radial driver (e.g. an explicit
-  per-rank radius target, or the radial `--sel-margin` term), even though the geometry is feasible.
+- Fig. 13: **geodesic-distance CL drives MERU's curvature DOWN to the clamp floor (0.1)**; their
+  loss drives it **UP to ~5** and plateaus. They call geodesic-CL-in-hyperbolic a "fundamental
+  mismatch," and report MERU **fails to converge at fixed curvature ≥ 0.5** (Table 5).
+- Our analytical feasibility threshold (**c ≳ 4**) and their successful loss's converged curvature
+  (**~5**) agree — strong external evidence that the feasible regime is up there, not at c≈1.
 
-Either outcome is informative and is *justified by this analytical feasibility result* — which is
-why we report the `ideal_hierarchy.py` experiment as the basis for the `curv_init ≥ 4` choice.
+**Their fix is a LOSS, not an init** — and it names the missing ingredient. Their final loss
+(Eq. 11–13) is `L_angle + λ·L_centroid`:
+- `L_angle` = an **angle-based** contrastive loss (replace geodesic similarity with the exterior
+  angle α = `oxy_angle`; minimise α for matches, maximise β = π − α). This is *our* angle-CL.
+- `L_centroid` = a soft regulariser forcing the **text centroid closer to the origin than the image
+  centroid** — an explicit **radial-ordering driver** (coarse=text near origin, fine=image far out).
+
+Crucially, **angle-CL alone is NOT the curvature driver** — our angle-CL configs (C5/C6) drove
+curvature DOWN (0.70/0.75) and collapsed angularly (dir-cos 0.91–0.96), the *opposite* of their
+c→5. The difference is `L_centroid`: without a radial driver, angle-CL satisfies itself by angular
+collapse (our result); with it, embeddings spread radially and curvature rises (their result). They
+also report `L_entail` alone gave "no meaningful results" — matching our SEL-only C2/C3 being worst.
+
+## What is ours vs known, and the proposed experiment
+
+- **Novel (ours):** the analytical **feasibility threshold c ≳ 4** (`ideal_hierarchy.py`); the
+  diagnosis that every cone-based config sits at c≈1; and the **mechanism** — SEL satisfied-by-
+  collapse zeroes the curvature gradient (C2: c frozen 1.00→1.00), `logit_scale` is just CLIP
+  temperature, not a curvature substitute.
+- **Known (Accept-the-Modality-Gap):** that geodesic-CL suppresses curvature and that an
+  `angle-CL + radial-centroid` loss raises it to ~5. So a curvature fix is **not** our contribution;
+  cite them. Our `curv_init` test is a *control/ablation*, not a proposed method.
+
+Experiment (after the margin sweep), framed as ablations, not a novel fix:
+1. **`curv_init = 4, learn_curv = False`** (pinned) — cleanest test of "is the c≳4 geometry usable
+   for classification when we force it." Isolates geometry-feasibility from loss-drift.
+2. **`curv_init = 4, learn_curv = True`** — does it *hold* near 4, or drift back down like their
+   MERU? (Our C2 low-drift evidence says it may hold under SEL; their Fig. 13 says geodesic-CL
+   would pull it down. The B0 mix decides it empirically.)
+3. The principled fix to *compare against* is their `L_angle + L_centroid` (angle-CL + a radial
+   centroid term) — the radial driver our diagnostics kept pointing at, now with a published form.
