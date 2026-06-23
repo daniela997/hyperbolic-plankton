@@ -33,8 +33,15 @@ def _full_strings_fast(ds):
 
 
 def main():
+    global SPLIT_DIR
+    import argparse
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--cache", default=CACHE)
+    ap.add_argument("--split-dir", default=SPLIT_DIR)
+    args = ap.parse_args()
+    SPLIT_DIR = args.split_dir
     os.makedirs(SPLIT_DIR, exist_ok=True)
-    full = load_from_disk(CACHE)
+    full = load_from_disk(args.cache)
     n = len(full)
     print(f"cache rows: {n:,}")
 
