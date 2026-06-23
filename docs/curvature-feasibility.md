@@ -68,13 +68,37 @@ The v3 ladder's learned curvatures (from `docs/diag_all_v3.log`):
 infeasible regime. They initialise at `c_init = 1` and barely move. So:
 
 > The three properties are jointly **achievable**; B0 (and every variant) fails because the learned
-> curvature is **~4× too small** to make the cone hierarchy nest a separable set, and the SEL loss
-> provides **no pressure to raise it** (origin-collapse — all ranks near the origin, apertures
-> saturated at π/2 — is a low-curvature-friendly lazy basin the optimiser settles into).
+> curvature is **~4× too small** to make the cone hierarchy nest a separable set, and the loss
+> provides **no pressure to raise it.**
 
-This is an *optimisation/parametrisation* failure, **not** a geometric impossibility, and **not** a
+### Why training doesn't reach `c ≥ 4` (curvature gradient is weak; verified)
+
+Curvature flows through *both* loss terms, yet barely moves. The mechanism, confirmed from the
+wandb trajectories:
+
+- **SEL pins curvature.** SEL is satisfied the easy way — origin-collapse (all ranks near origin,
+  apertures saturated at π/2) makes the hinge `relu(oxy_angle − τ·ψ) = 0` at *any* curvature. A
+  satisfied hinge has **zero gradient**, so SEL exerts no curvature pressure. Decisive evidence:
+  **C2 (SEL-only, no CL) holds `c` at exactly 1.00 → 1.00** for all 80 epochs.
+- **CL's curvature gradient is weak and not upward.** With CL present, `c` drifts only a little, and
+  not consistently up: distance-CL → 1.08 (B0) / 1.38 (C4); **angle-CL → 0.70 (C5) / 0.75 (C6),
+  i.e. *down*.** None approach 4.
+- **`logit_scale` is NOT a curvature substitute.** It is the standard CLIP softmax temperature; it
+  rises 14.3 → ~21 whenever CL is present (B0/C4/C5/C6 alike) as the model sharpens its contrastive
+  distribution — normal CLIP behaviour, independent of curvature. (Earlier hypothesis that
+  `logit_scale` "absorbs" curvature via a `(c, scale)` degeneracy is **refuted** by C2: removing CL
+  freezes *both* `scale` and `curv`, so they are decoupled, not trading off.)
+
+Net: the feasible (c≥4) and collapsed (c≈1) geometries have ~the same loss, and the optimiser has
+no gradient incentive to leave the easy-to-reach low-`c` basin. This is an
+*optimisation/parametrisation* failure, **not** a geometric impossibility, and **not** a
 high-fan-out containment obstruction (a coarse rank near the origin has a near-π/2 cone that
 contains all descendants regardless of fan-out — see retracted note).
+
+Practical consequence: because `c` barely drifts from init (C2: 0 drift; others 8–38%),
+**initialising at `c_init = 4` should largely STAY near 4** — the weak residual gradient won't undo
+a 4× init. So `learn_curv=True` with `curv_init=4` is expected to hold the feasible regime; pinning
+(`learn_curv=False`) is the stricter control.
 
 ## Prediction / proposed experiment
 
