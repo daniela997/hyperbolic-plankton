@@ -708,24 +708,30 @@ def main():
                         cl = accum_contrastive_loss_ddp(
                             kind, local_i, local_t, core.curvature, core.logit_scale.exp(),
                             local_ids=local_ids)
-                    # SEL per micro-batch via forward_loss's SEL branch (lambda_cl=0 → SEL grad only).
-                    sel = cl.new_zeros(())
+                    # SEL per micro-batch via forward_loss's SEL branch (lambda_cl=0 → SEL only).
+                    # Take the FIRST return (the grad-carrying loss = lambda_sel*sel); the 3rd
+                    # return is sel.DETACHED (logging) and would give SEL zero gradient.
+                    sel_loss = cl.new_zeros(())
+                    sel_val = 0.0
                     if args.geometry != "euclidean" and args.lambda_sel > 0:
-                        _, _, sel = forward_loss(
+                        sel_loss, _, sel_det = forward_loss(
                             ddp_model, pixel_values, taxonomy_batch, args.lambda_sel,
                             stats=step_stats, sel_indep=(args.sel_text == "independent"),
                             contrastive=args.contrastive, ranks=ranks, sel_tau=args.sel_tau,
                             sel_leak=args.sel_leak, sel_uncertainty=args.sel_uncertainty,
                             sel_margin=args.sel_margin, cl_mask=args.cl_mask,
-                            lambda_cl=0.0, geometry=args.geometry)
+                            lambda_cl=0.0, geometry=args.geometry,
+                            rince_min_tau=args.rince_min_tau, rince_max_tau=args.rince_max_tau,
+                            rince_sim=args.rince_sim)
+                        sel_val = float(sel_det)         # sel_loss already = lambda_sel * sel
                     # OpenCLIP backprops the full-set CE for EACH micro with NO /accum (l.162): the
                     # active slice differs per micro, so summing over micros gives each slice its
                     # full-set gradient exactly once. SEL is genuinely per-micro -> /accum to average.
-                    loss = args.lambda_cl * cl + args.lambda_sel * sel / args.accum
+                    loss = args.lambda_cl * cl + sel_loss / args.accum
                 scaler.scale(loss).backward()
                 run_loss += loss.item()
                 run_cl += cl.item() / args.accum   # log the per-micro-equivalent CL (cl is summed)
-                run_sel += float(sel)
+                run_sel += sel_val
         else:
             # standard accumulation: CL negatives = micro_bs * world per micro-batch
             for micro in range(args.accum):
