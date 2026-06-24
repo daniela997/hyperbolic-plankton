@@ -39,6 +39,7 @@ from hyperbolic_plankton.eval import (
 from hyperbolic_plankton.loss import (
     _deepest_text,
     _dense_ids,
+    accum_contrastive_loss_ddp,
     euclidean_contrastive_loss_ddp,
     hyperbolic_angle_contrastive_loss_ddp,
     hyperbolic_contrastive_loss_ddp,
@@ -227,6 +228,18 @@ def log(msg):
         print(msg, flush=True)
 
 
+def encode_cl_features(model, pixel_values, taxonomy_batch, ranks, cl_mask, geometry):
+    """Encode the pieces the CL term needs: (img, deepest_text, class_ids, cum_embs). Shared by
+    forward_loss and the cache-accum path so the cache pass and grad pass encode identically."""
+    core = model.module if isinstance(model, DDP) else model
+    project = geometry != "euclidean"
+    img = core.encode_image(pixel_values, project=project)
+    cum_embs = core.encode_taxonomy(taxonomy_batch, project=project)
+    deepest, _ = _deepest_text(cum_embs, ranks)
+    class_ids = _dense_ids(taxonomy_batch["full"], img.device) if cl_mask == "same" else None
+    return img, deepest, class_ids, cum_embs
+
+
 def forward_loss(model, pixel_values, taxonomy_batch, lambda_sel, stats=None,
                  sel_indep=True, contrastive="distance", ranks=RANKS,
                  sel_tau=1.0, sel_leak=0.0, sel_uncertainty=0.0, sel_margin=0.0, cl_mask="none", lambda_cl=1.0,
@@ -246,20 +259,13 @@ def forward_loss(model, pixel_values, taxonomy_batch, lambda_sel, stats=None,
     """
     core = model.module if isinstance(model, DDP) else model
     euclidean = geometry == "euclidean"
-    project = not euclidean  # euclidean CL works on the pre-exp-map projected features
-    img = core.encode_image(pixel_values, project=project)
     curv = core.curvature
     scale = core.logit_scale.exp()
     # Contrastive: align image to its deepest CUMULATIVE (`full`) text — the paper's
-    # full-text-for-CL.
-    cum_embs = core.encode_taxonomy(taxonomy_batch, project=project)
-    deepest, _ = _deepest_text(cum_embs, ranks)
-    # cl_mask: suppress same-class off-diagonal negatives (true positives mis-treated as
-    # negatives — ~4.4% of pairs in clade-imbalanced plankton batches). class id = dense id
-    # of the deepest cumulative `full` lineage string.
-    class_ids = None
-    if cl_mask == "same":
-        class_ids = _dense_ids(taxonomy_batch["full"], img.device)
+    # full-text-for-CL. cl_mask: suppress same-class off-diagonal negatives (true positives
+    # mis-treated as negatives — ~4.4% of pairs in clade-imbalanced plankton batches).
+    img, deepest, class_ids, cum_embs = encode_cl_features(
+        model, pixel_values, taxonomy_batch, ranks, cl_mask, geometry)
     if euclidean:
         cl_fn = euclidean_contrastive_loss_ddp
     elif contrastive == "angle":
@@ -306,6 +312,11 @@ def main():
                     help="warmup as a fraction of total steps (paper warms up proportionally)")
     ap.add_argument("--micro-bs", type=int, default=128)
     ap.add_argument("--accum", type=int, default=3)
+    ap.add_argument("--cache-accum-cl", action="store_true",
+                    help="OpenCLIP-style cache-recompute so CL negatives span the full "
+                         "micro_bs*accum*world batch (not just one micro-batch). CL only; SEL "
+                         "stays per-micro. Loss is negative-set-exact, gradient-approximate "
+                         "(cached negatives detached, as in OpenCLIP). No effect when accum=1.")
     ap.add_argument("--lr", type=float, default=2.5e-4)
     ap.add_argument("--wd", type=float, default=0.2)
     ap.add_argument("--optimizer", default="adamw", choices=["adamw", "adam"],
@@ -626,40 +637,85 @@ def main():
         opt.zero_grad(set_to_none=True)
         # collect the SEL term breakdown on the last micro-step of an iter that will log.
         is_log_iter = (it + 1) % args.log_every == 0
-        # gradient accumulation: `accum` micro-batches per optimizer step
-        for micro in range(args.accum):
+        def next_batch():
+            nonlocal epoch, data_iter
             try:
-                pixel_values, taxonomy_batch, _ = next(data_iter)
+                pv, tb, _ = next(data_iter)
             except StopIteration:
                 epoch += 1
                 if sampler is not None:
                     sampler.set_epoch(epoch)
                 data_iter = iter(loader)
-                pixel_values, taxonomy_batch, _ = next(data_iter)
-            pixel_values = pixel_values.to(device, non_blocking=True)
-            # only sync grads on the last micro-step (DDP no_sync on the others)
-            sync_ctx = (
-                ddp_model.no_sync()
-                if ddp and micro < args.accum - 1
-                else _nullctx()
-            )
-            last_micro = micro == args.accum - 1
-            step_stats = sel_terms if (is_log_iter and last_micro and is_main()) else None
-            with sync_ctx, torch.amp.autocast("cuda"):
-                loss, cl, sel = forward_loss(
-                    ddp_model, pixel_values, taxonomy_batch, args.lambda_sel,
-                    stats=step_stats, sel_indep=(args.sel_text == "independent"),
-                    contrastive=args.contrastive, ranks=ranks,
-                    sel_tau=args.sel_tau, sel_leak=args.sel_leak,
-                    sel_uncertainty=args.sel_uncertainty, sel_margin=args.sel_margin,
-                    cl_mask=args.cl_mask,
-                    lambda_cl=args.lambda_cl, geometry=args.geometry,
+                pv, tb, _ = next(data_iter)
+            return pv.to(device, non_blocking=True), tb
+
+        if args.cache_accum_cl and args.accum > 1:
+            # OpenCLIP cache-recompute for CL: pass 1 caches all micro-batch CL features
+            # (no grad); pass 2 recomputes each micro-batch and scores it against the full
+            # cached bank as negatives. SEL stays per-micro-batch (not contrastive).
+            micros = [next_batch() for _ in range(args.accum)]
+            with torch.no_grad(), torch.amp.autocast("cuda"):
+                cached = [encode_cl_features(ddp_model, pv, tb, ranks, args.cl_mask, args.geometry)
+                          for pv, tb in micros]
+            cache_i, cache_t, cache_ids = [c[0] for c in cached], [c[1] for c in cached], [c[2] for c in cached]
+            kind = args.geometry if args.geometry == "euclidean" else args.contrastive
+            for micro, (pixel_values, taxonomy_batch) in enumerate(micros):
+                last_micro = micro == args.accum - 1
+                sync_ctx = ddp_model.no_sync() if (ddp and not last_micro) else _nullctx()
+                step_stats = sel_terms if (is_log_iter and last_micro and is_main()) else None
+                with sync_ctx, torch.amp.autocast("cuda"):
+                    img, deepest, class_ids, _ = encode_cl_features(
+                        ddp_model, pixel_values, taxonomy_batch, ranks, args.cl_mask, args.geometry)
+                    core = ddp_model.module if ddp else ddp_model
+                    other_i = torch.cat(cache_i[:micro] + cache_i[micro + 1:])
+                    other_t = torch.cat(cache_t[:micro] + cache_t[micro + 1:])
+                    other_ids = (torch.cat(cache_ids[:micro] + cache_ids[micro + 1:])
+                                 if class_ids is not None else None)
+                    cl = accum_contrastive_loss_ddp(
+                        kind, img, deepest, other_i, other_t, core.curvature,
+                        core.logit_scale.exp(), class_ids=class_ids, other_ids=other_ids)
+                    # SEL per micro-batch via forward_loss's SEL branch (lambda_cl=0 → SEL grad only).
+                    sel = cl.new_zeros(())
+                    if args.geometry != "euclidean" and args.lambda_sel > 0:
+                        _, _, sel = forward_loss(
+                            ddp_model, pixel_values, taxonomy_batch, args.lambda_sel,
+                            stats=step_stats, sel_indep=(args.sel_text == "independent"),
+                            contrastive=args.contrastive, ranks=ranks, sel_tau=args.sel_tau,
+                            sel_leak=args.sel_leak, sel_uncertainty=args.sel_uncertainty,
+                            sel_margin=args.sel_margin, cl_mask=args.cl_mask,
+                            lambda_cl=0.0, geometry=args.geometry)
+                    loss = (args.lambda_cl * cl + args.lambda_sel * sel) / args.accum
+                scaler.scale(loss).backward()
+                run_loss += loss.item() * args.accum
+                run_cl += cl.item()
+                run_sel += float(sel)
+        else:
+            # standard accumulation: CL negatives = micro_bs * world per micro-batch
+            for micro in range(args.accum):
+                pixel_values, taxonomy_batch = next_batch()
+                # only sync grads on the last micro-step (DDP no_sync on the others)
+                sync_ctx = (
+                    ddp_model.no_sync()
+                    if ddp and micro < args.accum - 1
+                    else _nullctx()
                 )
-                loss = loss / args.accum
-            scaler.scale(loss).backward()
-            run_loss += loss.item() * args.accum
-            run_cl += cl.item()
-            run_sel += sel.item()
+                last_micro = micro == args.accum - 1
+                step_stats = sel_terms if (is_log_iter and last_micro and is_main()) else None
+                with sync_ctx, torch.amp.autocast("cuda"):
+                    loss, cl, sel = forward_loss(
+                        ddp_model, pixel_values, taxonomy_batch, args.lambda_sel,
+                        stats=step_stats, sel_indep=(args.sel_text == "independent"),
+                        contrastive=args.contrastive, ranks=ranks,
+                        sel_tau=args.sel_tau, sel_leak=args.sel_leak,
+                        sel_uncertainty=args.sel_uncertainty, sel_margin=args.sel_margin,
+                        cl_mask=args.cl_mask,
+                        lambda_cl=args.lambda_cl, geometry=args.geometry,
+                    )
+                    loss = loss / args.accum
+                scaler.scale(loss).backward()
+                run_loss += loss.item() * args.accum
+                run_cl += cl.item()
+                run_sel += sel.item()
 
         scaler.step(opt)
         scaler.update()

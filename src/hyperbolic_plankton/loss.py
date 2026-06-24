@@ -29,6 +29,7 @@ __all__ = [
     "sel_intra",
     "sel_inter",
     "stacked_entailment_loss",
+    "accum_contrastive_loss_ddp",
 ]
 
 
@@ -207,6 +208,58 @@ def euclidean_contrastive_loss_ddp(
         img_logits = img_logits.masked_fill(mask, float("-inf"))
         text_logits = text_logits.masked_fill(mask, float("-inf"))
     targets = torch.arange(B, device=img.device) + B * rank
+    return 0.5 * (F.cross_entropy(img_logits, targets) + F.cross_entropy(text_logits, targets))
+
+
+def _cl_logits(kind, img, text, all_img, all_text, curv, scale):
+    """The [B, N] image- and text-side logit matrices for each CL variant (the only part that
+    differs between the three *_ddp losses). `all_*` is the full negative bank (gathered + cached)."""
+    if kind == "euclidean":
+        return scale * F.normalize(img, dim=-1) @ F.normalize(all_text, dim=-1).T, \
+               scale * F.normalize(text, dim=-1) @ F.normalize(all_img, dim=-1).T
+    if kind == "angle":
+        return L.pairwise_oxy_angle(img, all_text, curv) * scale, \
+               -L.pairwise_oxy_angle(text, all_img, curv) * scale
+    return -L.pairwise_dist(img, all_text, curv) * scale, \
+           -L.pairwise_dist(text, all_img, curv) * scale
+
+
+def accum_contrastive_loss_ddp(
+    kind, img, text, other_img, other_text, curv, scale,
+    class_ids=None, other_ids=None,
+):
+    """Accumulation-aware CL for one micro-batch (OpenCLIP cache-recompute, composed with our
+    cross-GPU gather). `img`/`text` are THIS micro-batch's fresh, grad-carrying features;
+    `other_img`/`other_text` are the cat of the OTHER micro-batches' cached (detached) features.
+
+    The negative bank for a local sample is: [cross-rank gather of the fresh local features]
+    ++ [this rank's cached other-micro-batch features]. Only the fresh features carry grad
+    (gather is autograd-aware; the cached bank is detached), so summing this over all
+    micro-batches j gives each its turn against the FULL micro_bs*accum*world negative set —
+    matching OpenCLIP's two-pass with our DDP negatives. `kind` ∈ {distance, angle, euclidean}.
+    """
+    import torch.distributed as dist
+    ddp = dist.is_available() and dist.is_initialized() and dist.get_world_size() > 1
+    B = img.shape[0]
+    if ddp:
+        gathered_img, gathered_text = _gather_across_processes(img), _gather_across_processes(text)
+        rank, world = dist.get_rank(), dist.get_world_size()
+        gathered_ids = _gather_labels(class_ids) if class_ids is not None else None
+    else:
+        gathered_img, gathered_text, rank, world = img, text, 0, 1
+        gathered_ids = class_ids
+    # negative bank = gathered fresh (diagonal lives here) ++ this rank's cached others
+    all_img = torch.cat([gathered_img, other_img])
+    all_text = torch.cat([gathered_text, other_text])
+    img_logits, text_logits = _cl_logits(kind, img, text, all_img, all_text, curv, scale)
+    if class_ids is not None:
+        # mask over the WHOLE bank (gathered ++ cached): a same-class cached negative is a false
+        # negative too. _false_negative_mask clears the diagonal at i+B*rank (in the gathered block).
+        all_ids = torch.cat([gathered_ids, other_ids])
+        mask = _false_negative_mask(class_ids, all_ids, rank)  # [B, B*world + other]
+        img_logits = img_logits.masked_fill(mask, float("-inf"))
+        text_logits = text_logits.masked_fill(mask, float("-inf"))
+    targets = torch.arange(B, device=img.device) + B * rank   # diagonal in the gathered block
     return 0.5 * (F.cross_entropy(img_logits, targets) + F.cross_entropy(text_logits, targets))
 
 
