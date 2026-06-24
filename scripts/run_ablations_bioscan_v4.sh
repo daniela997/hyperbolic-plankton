@@ -1,116 +1,95 @@
 #!/bin/bash
-# BIOSCAN ablation ladder — V4: identical to v3 EXCEPT CL uses OpenCLIP-style cache-recompute
-# accumulation (--cache-accum-cl). With accum=3, CL is the FULL micro_bs*accum*world = 768-way
-# InfoNCE (v3 was the mean of accum independent 256-way losses). The faithful impl
-# (loss.py accum_contrastive_loss_ddp) recovers the EXACT 768-batch gradient (verified vs
-# full-batch: ratio 1.000, cosine 1.000). SEL is unchanged (per-micro-batch).
+# BIOSCAN ablation ladder — V4: cache-accum CL (true 768-way InfoNCE) + the RINCE sub-grid.
 #
-# CONFOUND: v4 is NOT directly comparable to v3 — (a) the contrastive objective changed (mean of
-# 256-way -> single 768-way) and (b) the v4 gradient is ~1.28x the v3 magnitude (true large-batch
-# vs mean-of-small-batch), so the LR is effectively higher. The v3 recipe (lr 2.5e-4) was tuned
-# for v3's objective; v4 may need re-tuning. Compare configs WITHIN v4.
+# Recipe LOCKED from the v4 cache-accum sweep (zojuv2lz, best trial seen 0.640 @ 50ep, beats the
+# v3 80ep B0 0.628): adam / onecycle / lr 2.32e-4 / wd 1e-4 / r64 / 12+12 blocks / 50 epochs /
+# seed 0 / fp16 / --cache-accum-cl. micro-bs 64 / accum 6 (eff batch 768; micro-bs 128 OOMs with
+# cache-accum). vs v3 the only recipe change is wd 1e-3 -> 1e-4 (cache-accum wants less decay).
 #
-# The DEVELOPMENT testbed (complete-to-species, ~2.5h/run vs ~20h on Planktonzilla). Full C0-C10
-# grid + Euclidean baseline. 2 GPUs per run, sequential (~30h total).
-#
-# ONE shared recipe so every difference reflects the LOSS under test, not tuning:
-# adam / wd 1e-3 / onecycle peak-lr 2.5e-4 / r64 / 12+12 blocks / 80 epochs / seed 0 / fp16.
-# Found by a bayes recipe sweep on B0 (sweeps a6l07tbj + xknll2bu, 21 trials): r64-128 beat
-# r32, wd 1e-3/1e-2 beat 1e-4, lr peaks ~2.5e-4 (>=7e-4 NaNs), optimizer/scheduler ~indifferent.
-# Best trial seen 0.57 / unseen 0.060 — comfortably beats the prior r32/wd0.2 ladder, which had
-# crippled hyperbolic (rank+wd were the cause, NOT geometry — the earlier "Euclidean wins"
-# result was a recipe artifact). lr is the onecycle PEAK. Verified at 80ep before this ladder.
-#
-# The grid (B0 = the Taxonomy-paper method; C1-C10 vary one axis each):
-#   axes: lambda_cl/sel (CL-only / SEL-only / both), contrastive (distance/angle),
-#         sel-text (independent/cumulative), cl-mask (none/same = false-negative suppression)
+# Two blocks:
+#  (1) C0-C10 + Euclidean — the loss ablation, now on the cache-accum (768-neg) objective.
+#  (2) RINCE sub-grid — ranked-positive CL (graded by taxonomic depth, geometry-agnostic
+#      alternative to SEL cones): ranked x {CL-only, +SEL-indep, +SEL-cumul} x {distance,angle sim}.
 #
 # Read results: PYTHONPATH=src python scripts/final_eval.py --ckpt <dir>/<tag>_best.pt \
 #   --dataset bioscan --backbone clip --lora --lora-r 64 --lora-visual-blocks 12 \
 #   --lora-text-blocks 12 --geometry {euclidean|hyperbolic}
+#
+#   tmux new-session -d -s ablate4 'bash scripts/run_ablations_bioscan_v4.sh 2>&1 | tee /tmp/ablate_v4.log'
 
 cd /home/daniela/mine/hyperbolic-plankton
-
-# absolute paths so this works in a non-interactive tmux shell (no conda activation)
 PY=/scratch/daniela/miniconda3/envs/dino_plankton/bin/python
 TORCHRUN=/scratch/daniela/miniconda3/envs/dino_plankton/bin/torchrun
 
-# NO `set -e`: one config crashing (e.g. a NaN like C10 last time) must NOT abort the whole
-# overnight ladder. Each run is wrapped so failures are logged and the ladder continues.
+# NO `set -e`: one config crashing (e.g. a NaN) must NOT abort the whole ladder.
 run() {
     local TAG=$1; shift
     echo -e "\n=================================================================="
     echo "🚀 $TAG"
     echo "=================================================================="
     if ! PYTHONPATH=src "$TORCHRUN" --nproc_per_node=2 --master_port=29557 scripts/train_lora.py \
-        --dataset bioscan --backbone clip --epochs 80 --micro-bs 128 --accum 3 \
-        --lr 2.5e-4 --wd 1e-3 --optimizer adam --scheduler onecycle \
+        --dataset bioscan --backbone clip --epochs 50 --micro-bs 64 --accum 6 --cache-accum-cl \
+        --lr 2.32e-4 --wd 1e-4 --optimizer adam --scheduler onecycle \
         --onecycle-pct-start 0.3 --onecycle-min-lr 1e-6 \
         --lora-r 64 --lora-visual-blocks 12 --lora-text-blocks 12 \
-        --seed 0 --compile --eval-epochs 1.0 --cache-accum-cl \
+        --seed 0 --compile --eval-epochs 1.0 \
         "$@" \
         --tag "$TAG"; then
         echo "⚠️  $TAG FAILED (exit $?) — continuing to next config"
     fi
 }
 
-# E — Euclidean baseline (LoRA-vs-full-FT + flat-vs-hyperbolic control). No SEL (forced).
+# ============================ (1) C0-C10 + Euclidean ============================
 run "bioscan_E_euclidean_r64_v4" \
     --geometry euclidean --lambda-cl 1.0 --cl-mask none
 
-# B0 — baseline = the Taxonomy-paper method (CL distance + SEL independent, lambda_cl=sel=1)
 run "bioscan_B0_baseline_r64_v4" \
-    --lambda-cl 1.0 --lambda-sel 1.0 --contrastive distance --cl-mask none \
-    --sel-text independent --sel-tau 1.0 --sel-leak 0.0 --sel-uncertainty 0.0
+    --lambda-cl 1.0 --lambda-sel 1.0 --contrastive distance --cl-mask none --sel-text independent
 
-# C1 — SEL text cumulative (vs B0's independent)
 run "bioscan_C1_seltext_cumulative_r64_v4" \
-    --lambda-cl 1.0 --lambda-sel 1.0 --contrastive distance --cl-mask none \
-    --sel-text cumulative --sel-tau 1.0 --sel-leak 0.0 --sel-uncertainty 0.0
+    --lambda-cl 1.0 --lambda-sel 1.0 --contrastive distance --cl-mask none --sel-text cumulative
 
-# C2 — SEL-only, cumulative (no contrastive)
 run "bioscan_C2_selonly_cumulative_r64_v4" \
-    --lambda-cl 0.0 --lambda-sel 1.0 --contrastive distance --cl-mask none \
-    --sel-text cumulative --sel-tau 1.0 --sel-leak 0.0 --sel-uncertainty 0.0
+    --lambda-cl 0.0 --lambda-sel 1.0 --contrastive distance --cl-mask none --sel-text cumulative
 
-# C3 — SEL-only, independent (no contrastive)
 run "bioscan_C3_selonly_independent_r64_v4" \
-    --lambda-cl 0.0 --lambda-sel 1.0 --contrastive distance --cl-mask none \
-    --sel-text independent --sel-tau 1.0 --sel-leak 0.0 --sel-uncertainty 0.0
+    --lambda-cl 0.0 --lambda-sel 1.0 --contrastive distance --cl-mask none --sel-text independent
 
-# C4 — CL-only (no SEL) = the hyperbolic lift without entailment
 run "bioscan_C4_clonly_r64_v4" \
-    --lambda-cl 1.0 --lambda-sel 0.0 --contrastive distance --cl-mask none \
-    --sel-text independent --sel-tau 1.0 --sel-leak 0.0 --sel-uncertainty 0.0
+    --lambda-cl 1.0 --lambda-sel 0.0 --contrastive distance --cl-mask none --sel-text independent
 
-# C5 — SEL cumulative + CL angle
 run "bioscan_C5_selcumulative_clangle_r64_v4" \
-    --lambda-cl 1.0 --lambda-sel 1.0 --contrastive angle --cl-mask none \
-    --sel-text cumulative --sel-tau 1.0 --sel-leak 0.0 --sel-uncertainty 0.0
+    --lambda-cl 1.0 --lambda-sel 1.0 --contrastive angle --cl-mask none --sel-text cumulative
 
-# C6 — SEL independent + CL angle
 run "bioscan_C6_selindependent_clangle_r64_v4" \
-    --lambda-cl 1.0 --lambda-sel 1.0 --contrastive angle --cl-mask none \
-    --sel-text independent --sel-tau 1.0 --sel-leak 0.0 --sel-uncertainty 0.0
+    --lambda-cl 1.0 --lambda-sel 1.0 --contrastive angle --cl-mask none --sel-text independent
 
-# C7 — SEL independent + CL distance + false-negative mask
 run "bioscan_C7_selindependent_cldistance_masksame_r64_v4" \
-    --lambda-cl 1.0 --lambda-sel 1.0 --contrastive distance --cl-mask same \
-    --sel-text independent --sel-tau 1.0 --sel-leak 0.0 --sel-uncertainty 0.0
+    --lambda-cl 1.0 --lambda-sel 1.0 --contrastive distance --cl-mask same --sel-text independent
 
-# C8 — SEL cumulative + CL distance + false-negative mask
 run "bioscan_C8_selcumulative_cldistance_masksame_r64_v4" \
-    --lambda-cl 1.0 --lambda-sel 1.0 --contrastive distance --cl-mask same \
-    --sel-text cumulative --sel-tau 1.0 --sel-leak 0.0 --sel-uncertainty 0.0
+    --lambda-cl 1.0 --lambda-sel 1.0 --contrastive distance --cl-mask same --sel-text cumulative
 
-# C9 — SEL independent + CL angle + false-negative mask
 run "bioscan_C9_selindependent_clangle_masksame_r64_v4" \
-    --lambda-cl 1.0 --lambda-sel 1.0 --contrastive angle --cl-mask same \
-    --sel-text independent --sel-tau 1.0 --sel-leak 0.0 --sel-uncertainty 0.0
+    --lambda-cl 1.0 --lambda-sel 1.0 --contrastive angle --cl-mask same --sel-text independent
 
-# C10 — SEL cumulative + CL angle + false-negative mask
 run "bioscan_C10_selcumulative_clangle_masksame_r64_v4" \
-    --lambda-cl 1.0 --lambda-sel 1.0 --contrastive angle --cl-mask same \
-    --sel-text cumulative --sel-tau 1.0 --sel-leak 0.0 --sel-uncertainty 0.0
+    --lambda-cl 1.0 --lambda-sel 1.0 --contrastive angle --cl-mask same --sel-text cumulative
 
-echo -e "\n✅ BIOSCAN C0-C10 + Euclidean ablation ladder complete."
+# ============================ (2) RINCE sub-grid ============================
+# ranked-CL graded by taxonomic depth. --cl-mask irrelevant (ranking subsumes it). sim x SEL grid.
+for SIM in distance angle; do
+    # R*-clonly: ranked CL alone (no SEL) — does graded-positive CL beat plain CL/cl-mask?
+    run "bioscan_R_ranked_${SIM}_clonly_r64_v4" \
+        --contrastive ranked --rince-sim $SIM --lambda-cl 1.0 --lambda-sel 0.0 --sel-text independent
+
+    # R*-selindep: ranked CL + SEL independent — does the entailment hierarchy add to RINCE?
+    run "bioscan_R_ranked_${SIM}_selindep_r64_v4" \
+        --contrastive ranked --rince-sim $SIM --lambda-cl 1.0 --lambda-sel 1.0 --sel-text independent
+
+    # R*-selcumul: ranked CL + SEL cumulative
+    run "bioscan_R_ranked_${SIM}_selcumul_r64_v4" \
+        --contrastive ranked --rince-sim $SIM --lambda-cl 1.0 --lambda-sel 1.0 --sel-text cumulative
+done
+
+echo -e "\n✅ BIOSCAN v4 ladder (C0-C10 + Euclidean + RINCE sub-grid) complete."

@@ -245,7 +245,7 @@ def encode_cl_features(model, pixel_values, taxonomy_batch, ranks, cl_mask, geom
 def forward_loss(model, pixel_values, taxonomy_batch, lambda_sel, stats=None,
                  sel_indep=True, contrastive="distance", ranks=RANKS,
                  sel_tau=1.0, sel_leak=0.0, sel_uncertainty=0.0, sel_margin=0.0, cl_mask="none", lambda_cl=1.0,
-                 geometry="hyperbolic", rince_min_tau=0.1, rince_max_tau=0.5):
+                 geometry="hyperbolic", rince_min_tau=0.1, rince_max_tau=0.5, rince_sim="distance"):
     """lambda_cl*contrastive(img, deepest_text) + lambda_sel*SEL. `model` may be a DDP
     wrapper; geometry helpers live on the underlying module.
 
@@ -269,11 +269,12 @@ def forward_loss(model, pixel_values, taxonomy_batch, lambda_sel, stats=None,
     img, deepest, class_ids, cum_embs = encode_cl_features(
         model, pixel_values, taxonomy_batch, ranks, cl_mask, geometry)
     if contrastive == "ranked":
-        # RINCE: graded positives by taxonomic shared-depth (geometry-agnostic; works in eucl too)
+        # RINCE: graded positives by taxonomic shared-depth (geometry-agnostic; works in eucl too).
+        # rince_sim picks the similarity h(q,p): distance (-pairwise_dist) or angle (oxy_angle).
         lineage = stable_lineage_ids(taxonomy_batch, ranks, img.device)
+        rkind = "euclidean" if euclidean else rince_sim
         cl = ranked_contrastive_loss_ddp(
-            img, deepest, lineage, curv, scale,
-            kind=("euclidean" if euclidean else "distance"),
+            img, deepest, lineage, curv, scale, kind=rkind,
             max_depth=len(ranks), min_tau=rince_min_tau, max_tau=rince_max_tau)
     else:
         if euclidean:
@@ -355,6 +356,9 @@ def main():
                          "InfoNCE (radius-free, same oxy_angle quantity as SEL); ranked=RINCE "
                          "(Hoffmann 2022) graded-by-taxonomic-depth positives. "
                          "Ignored when --geometry euclidean.")
+    ap.add_argument("--rince-sim", default="distance", choices=["distance", "angle"],
+                    help="ranked CL similarity h(q,p): distance (-pairwise_dist) or angle "
+                         "(oxy_angle). Ignored unless --contrastive ranked (and not euclidean).")
     ap.add_argument("--rince-min-tau", type=float, default=0.1,
                     help="ranked CL: tau at the finest (species) level (sharp, hard negatives).")
     ap.add_argument("--rince-max-tau", type=float, default=0.5,
@@ -695,7 +699,7 @@ def main():
                         local_lin = torch.cat(cache_lin)  # [accum*mb, R]; fresh-vs-cached identical ids
                         cl = ranked_contrastive_loss_ddp(
                             local_i, local_t, local_lin, core.curvature, core.logit_scale.exp(),
-                            kind=("euclidean" if args.geometry == "euclidean" else "distance"),
+                            kind=("euclidean" if args.geometry == "euclidean" else args.rince_sim),
                             max_depth=len(ranks),
                             min_tau=args.rince_min_tau, max_tau=args.rince_max_tau)
                     else:
@@ -744,6 +748,7 @@ def main():
                         cl_mask=args.cl_mask,
                         lambda_cl=args.lambda_cl, geometry=args.geometry,
                         rince_min_tau=args.rince_min_tau, rince_max_tau=args.rince_max_tau,
+                        rince_sim=args.rince_sim,
                     )
                     loss = loss / args.accum
                 scaler.scale(loss).backward()
