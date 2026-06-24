@@ -1,0 +1,63 @@
+# B0 recipe sweep for the V4 cache-accum CL objective (--cache-accum-cl).
+# v4 CL is a true micro_bs*accum*world = 768-way InfoNCE whose gradient is ~1.28x the v3
+# (mean-of-256-way) magnitude, so the v3 recipe (adam/wd1e-3/onecycle/lr2.5e-4) is likely
+# mis-tuned — effectively a higher LR on a harder objective. This re-tunes for v4.
+#
+# FIXED (not swept): lora_r=64 (per decision), r64 12+12 blocks, B0 loss (distance CL +
+# independent SEL), --cache-accum-cl. SWEPT: optimizer {adam,adamw}, wd, lr, scheduler
+# {onecycle,warmupcos}. Same [5e-5,1e-3] log-uniform lr as the v3 sweep so the bayes search
+# can move the optimum down if v4's larger gradient wants a lower nominal lr.
+#
+# NOTE: v4's larger effective gradient is MORE NaN-prone at high lr (curvature instability) —
+# such trials log ~0 and bayes avoids them; a NaN trial scores 0, doesn't abort the agent.
+#
+#   wandb sweep --project hyperbolic-plankton-sweep scripts/sweeps/b0_recipe_v4_cacheaccum.yaml
+#   tmux new-session -d -s sweepv4 'PYTHONPATH=src .../wandb agent uofg/hyperbolic-plankton-sweep/<id> 2>&1 | tee /tmp/sweepv4.log'
+
+program: scripts/train_lora.py
+method: bayes
+metric:
+  name: eval/seen/species_f1
+  goal: maximize
+
+parameters:
+  optimizer:
+    values: [adam, adamw]
+  wd:
+    values: [1.0e-4, 1.0e-3, 1.0e-2]
+  lr:
+    distribution: log_uniform_values
+    min: 5.0e-5
+    max: 1.0e-3
+  scheduler:
+    values: [warmupcos, onecycle]
+
+command:
+  - ${env}
+  - /scratch/daniela/miniconda3/envs/dino_plankton/bin/torchrun
+  - --nproc_per_node=2
+  - --master_port=29559
+  - ${program}
+  - --dataset=bioscan
+  - --backbone=clip
+  - --epochs=50
+  - --micro-bs=128
+  - --accum=3
+  - --cache-accum-cl
+  - --lora-r=64
+  - --lora-visual-blocks=12
+  - --lora-text-blocks=12
+  - --warmup-frac=0.1
+  - --onecycle-pct-start=0.3
+  - --onecycle-min-lr=1e-6
+  - --geometry=hyperbolic
+  - --lambda-cl=1.0
+  - --lambda-sel=1.0
+  - --contrastive=distance
+  - --sel-text=independent
+  - --cl-mask=none
+  - --seed=0
+  - --compile
+  - --eval-epochs=1.0
+  - --wandb-project=hyperbolic-plankton-sweep
+  - ${args}   # swept: optimizer, wd, lr, scheduler
