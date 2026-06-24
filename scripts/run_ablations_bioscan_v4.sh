@@ -1,12 +1,14 @@
 #!/bin/bash
 # BIOSCAN ablation ladder — V4: identical to v3 EXCEPT CL uses OpenCLIP-style cache-recompute
-# accumulation (--cache-accum-cl). With accum=3, CL negatives now span the full
-# micro_bs*accum*world = 128*3*2 = 768 batch (v3 saw only 128*2 = 256). SEL is unchanged
-# (per-micro-batch). Cached negatives are detached, so the loss is negative-set-exact but the
-# gradient is approximate (as in OpenCLIP) — see loss.py accum_contrastive_loss_ddp.
+# accumulation (--cache-accum-cl). With accum=3, CL is the FULL micro_bs*accum*world = 768-way
+# InfoNCE (v3 was the mean of accum independent 256-way losses). The faithful impl
+# (loss.py accum_contrastive_loss_ddp) recovers the EXACT 768-batch gradient (verified vs
+# full-batch: ratio 1.000, cosine 1.000). SEL is unchanged (per-micro-batch).
 #
-# CONFOUND: v4 is NOT directly comparable to v3 — the contrastive batch changed (256 -> 768).
-# Compare configs WITHIN v4; comparing v4-B0 to v3-B0 isolates the effect of the larger CL set.
+# CONFOUND: v4 is NOT directly comparable to v3 — (a) the contrastive objective changed (mean of
+# 256-way -> single 768-way) and (b) the v4 gradient is ~1.28x the v3 magnitude (true large-batch
+# vs mean-of-small-batch), so the LR is effectively higher. The v3 recipe (lr 2.5e-4) was tuned
+# for v3's objective; v4 may need re-tuning. Compare configs WITHIN v4.
 #
 # The DEVELOPMENT testbed (complete-to-species, ~2.5h/run vs ~20h on Planktonzilla). Full C0-C10
 # grid + Euclidean baseline. 2 GPUs per run, sequential (~30h total).

@@ -224,42 +224,50 @@ def _cl_logits(kind, img, text, all_img, all_text, curv, scale):
            -L.pairwise_dist(text, all_img, curv) * scale
 
 
-def accum_contrastive_loss_ddp(
-    kind, img, text, other_img, other_text, curv, scale,
-    class_ids=None, other_ids=None,
-):
-    """Accumulation-aware CL for one micro-batch (OpenCLIP cache-recompute, composed with our
-    cross-GPU gather). `img`/`text` are THIS micro-batch's fresh, grad-carrying features;
-    `other_img`/`other_text` are the cat of the OTHER micro-batches' cached (detached) features.
+def _gather_local_loss(t: torch.Tensor) -> torch.Tensor:
+    """OpenCLIP gather_features(gather_with_grad=False, local_loss=False): non-differentiable
+    all_gather, then splice THIS rank's grad-carrying tensor back in. Gradient flows only through
+    the local slice (DDP all-reduce handles cross-rank sync) — NOT autograd-aware all_gather,
+    which double-counts with DDP and zeroes the gradient. Returns input unchanged off-DDP."""
+    import torch.distributed as dist
 
-    The negative bank for a local sample is: [cross-rank gather of the fresh local features]
-    ++ [this rank's cached other-micro-batch features]. Only the fresh features carry grad
-    (gather is autograd-aware; the cached bank is detached), so summing this over all
-    micro-batches j gives each its turn against the FULL micro_bs*accum*world negative set —
-    matching OpenCLIP's two-pass with our DDP negatives. `kind` ∈ {distance, angle, euclidean}.
+    if not (dist.is_available() and dist.is_initialized()) or dist.get_world_size() == 1:
+        return t
+    world, rank = dist.get_world_size(), dist.get_rank()
+    gathered = [torch.empty_like(t) for _ in range(world)]
+    dist.all_gather(gathered, t.contiguous())
+    gathered[rank] = t  # local rank keeps its grad-carrying tensor
+    return torch.cat(gathered, dim=0)
+
+
+def accum_contrastive_loss_ddp(
+    kind, local_img, local_text, curv, scale, local_ids=None,
+):
+    """Accumulation-aware CL for one grad-pass micro-step (faithful OpenCLIP cache-recompute).
+
+    `local_img`/`local_text` are the FULL local accum set for this rank
+    (cat(cached[:j] + [fresh_j] + cached[j+1:]), size accum*mb), where only the active
+    micro-batch slice carries gradient (the rest are detached cached features). This mirrors
+    OpenCLIP train.py line 154 exactly: the whole set is queried against itself.
+
+    Cross-rank: gather the full local sets NON-differentiably and splice the local (grad-carrying)
+    set back in (OpenCLIP gather_features, gather_with_grad=False, local_loss=False). Gradient
+    flows only through the local slice; DDP all-reduce syncs across ranks. `kind` ∈ {distance,
+    angle, euclidean}. Targets are the diagonal of the local block in the gathered bank.
     """
     import torch.distributed as dist
     ddp = dist.is_available() and dist.is_initialized() and dist.get_world_size() > 1
-    B = img.shape[0]
-    if ddp:
-        gathered_img, gathered_text = _gather_across_processes(img), _gather_across_processes(text)
-        rank, world = dist.get_rank(), dist.get_world_size()
-        gathered_ids = _gather_labels(class_ids) if class_ids is not None else None
-    else:
-        gathered_img, gathered_text, rank, world = img, text, 0, 1
-        gathered_ids = class_ids
-    # negative bank = gathered fresh (diagonal lives here) ++ this rank's cached others
-    all_img = torch.cat([gathered_img, other_img])
-    all_text = torch.cat([gathered_text, other_text])
-    img_logits, text_logits = _cl_logits(kind, img, text, all_img, all_text, curv, scale)
-    if class_ids is not None:
-        # mask over the WHOLE bank (gathered ++ cached): a same-class cached negative is a false
-        # negative too. _false_negative_mask clears the diagonal at i+B*rank (in the gathered block).
-        all_ids = torch.cat([gathered_ids, other_ids])
-        mask = _false_negative_mask(class_ids, all_ids, rank)  # [B, B*world + other]
+    N = local_img.shape[0]                       # accum*mb (the full local set)
+    rank = dist.get_rank() if ddp else 0
+    all_img = _gather_local_loss(local_img)      # [N*world, D]; local slice keeps grad
+    all_text = _gather_local_loss(local_text)
+    img_logits, text_logits = _cl_logits(kind, local_img, local_text, all_img, all_text, curv, scale)
+    if local_ids is not None:
+        all_ids = _gather_labels(local_ids) if ddp else local_ids
+        mask = _false_negative_mask(local_ids, all_ids, rank)   # [N, N*world]
         img_logits = img_logits.masked_fill(mask, float("-inf"))
         text_logits = text_logits.masked_fill(mask, float("-inf"))
-    targets = torch.arange(B, device=img.device) + B * rank   # diagonal in the gathered block
+    targets = torch.arange(N, device=local_img.device) + N * rank  # local block's diagonal
     return 0.5 * (F.cross_entropy(img_logits, targets) + F.cross_entropy(text_logits, targets))
 
 

@@ -650,9 +650,11 @@ def main():
             return pv.to(device, non_blocking=True), tb
 
         if args.cache_accum_cl and args.accum > 1:
-            # OpenCLIP cache-recompute for CL: pass 1 caches all micro-batch CL features
-            # (no grad); pass 2 recomputes each micro-batch and scores it against the full
-            # cached bank as negatives. SEL stays per-micro-batch (not contrastive).
+            # Faithful OpenCLIP cache-recompute (train.py l.113-162): pass 1 caches all micro-batch
+            # CL features (no grad); pass 2 recomputes each micro j, splices fresh j into the full
+            # local set cat(cached[:j]+[fresh_j]+cached[j+1:]) and scores that whole set against the
+            # cross-rank-gathered bank. NO no_sync — DDP syncs each micro (cached feats are detached,
+            # so no cross-micro graph). SEL stays per-micro-batch.
             micros = [next_batch() for _ in range(args.accum)]
             with torch.no_grad(), torch.amp.autocast("cuda"):
                 cached = [encode_cl_features(ddp_model, pv, tb, ranks, args.cl_mask, args.geometry)
@@ -661,19 +663,19 @@ def main():
             kind = args.geometry if args.geometry == "euclidean" else args.contrastive
             for micro, (pixel_values, taxonomy_batch) in enumerate(micros):
                 last_micro = micro == args.accum - 1
-                sync_ctx = ddp_model.no_sync() if (ddp and not last_micro) else _nullctx()
                 step_stats = sel_terms if (is_log_iter and last_micro and is_main()) else None
-                with sync_ctx, torch.amp.autocast("cuda"):
+                with torch.amp.autocast("cuda"):
                     img, deepest, class_ids, _ = encode_cl_features(
                         ddp_model, pixel_values, taxonomy_batch, ranks, args.cl_mask, args.geometry)
                     core = ddp_model.module if ddp else ddp_model
-                    other_i = torch.cat(cache_i[:micro] + cache_i[micro + 1:])
-                    other_t = torch.cat(cache_t[:micro] + cache_t[micro + 1:])
-                    other_ids = (torch.cat(cache_ids[:micro] + cache_ids[micro + 1:])
+                    # full local set: fresh micro spliced into its position (OpenCLIP l.154)
+                    local_i = torch.cat(cache_i[:micro] + [img] + cache_i[micro + 1:])
+                    local_t = torch.cat(cache_t[:micro] + [deepest] + cache_t[micro + 1:])
+                    local_ids = (torch.cat(cache_ids[:micro] + [class_ids] + cache_ids[micro + 1:])
                                  if class_ids is not None else None)
                     cl = accum_contrastive_loss_ddp(
-                        kind, img, deepest, other_i, other_t, core.curvature,
-                        core.logit_scale.exp(), class_ids=class_ids, other_ids=other_ids)
+                        kind, local_i, local_t, core.curvature, core.logit_scale.exp(),
+                        local_ids=local_ids)
                     # SEL per micro-batch via forward_loss's SEL branch (lambda_cl=0 → SEL grad only).
                     sel = cl.new_zeros(())
                     if args.geometry != "euclidean" and args.lambda_sel > 0:
@@ -684,10 +686,13 @@ def main():
                             sel_leak=args.sel_leak, sel_uncertainty=args.sel_uncertainty,
                             sel_margin=args.sel_margin, cl_mask=args.cl_mask,
                             lambda_cl=0.0, geometry=args.geometry)
-                    loss = (args.lambda_cl * cl + args.lambda_sel * sel) / args.accum
+                    # OpenCLIP backprops the full-set CE for EACH micro with NO /accum (l.162): the
+                    # active slice differs per micro, so summing over micros gives each slice its
+                    # full-set gradient exactly once. SEL is genuinely per-micro -> /accum to average.
+                    loss = args.lambda_cl * cl + args.lambda_sel * sel / args.accum
                 scaler.scale(loss).backward()
-                run_loss += loss.item() * args.accum
-                run_cl += cl.item()
+                run_loss += loss.item()
+                run_cl += cl.item() / args.accum   # log the per-micro-equivalent CL (cl is summed)
                 run_sel += float(sel)
         else:
             # standard accumulation: CL negatives = micro_bs * world per micro-batch
