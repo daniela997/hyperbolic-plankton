@@ -30,6 +30,10 @@ __all__ = [
     "sel_inter",
     "stacked_entailment_loss",
     "accum_contrastive_loss_ddp",
+    "ranked_contrastive_loss_ddp",
+    "ranked_infonce",
+    "shared_depth_matrix",
+    "stable_lineage_ids",
 ]
 
 
@@ -135,6 +139,41 @@ def hyperbolic_contrastive_loss_ddp(
     return 0.5 * (F.cross_entropy(img_logits, targets) + F.cross_entropy(text_logits, targets))
 
 
+def ranked_contrastive_loss_ddp(
+    img, text, lineage_ids, curv, scale, kind="distance",
+    max_depth=4, min_tau=0.1, max_tau=0.5,
+):
+    """RINCE (ranked InfoNCE) cross-modal CL with taxonomic graded positives + cross-GPU bank.
+
+    `img`/`text` [B,D] are this rank's matched image/deepest-text features. `lineage_ids` [B,R] are
+    per-rank STABLE int ids (same string -> same id on every GPU; -1 = unknown) coarse->fine, used
+    to grade bank items by shared taxonomic depth. Query = local image; bank = ALL gathered texts.
+    Computes sim = h(image_i, text_j) and applies `ranked_infonce` (RINCE-in). `kind` selects the
+    similarity (distance/angle/euclidean). Falls back to the local square form off-DDP."""
+    import torch.distributed as dist
+    ddp = dist.is_available() and dist.is_initialized() and dist.get_world_size() > 1
+    if ddp:
+        all_text = _gather_across_processes(text)              # autograd-aware (grad to other ranks)
+        all_lin = _gather_int_rows(lineage_ids)                # [B*world, R], non-diff
+    else:
+        all_text, all_lin = text, lineage_ids
+    # image-vs-all-text similarity (same orientation as the *_ddp CL: query=image)
+    sim, _ = _cl_logits(kind, img, text, img, all_text, curv, scale)   # [B, B*world]
+    depth = shared_depth_matrix(lineage_ids, all_lin)          # [B, B*world]
+    return ranked_infonce(sim, depth, max_depth=max_depth, min_tau=min_tau, max_tau=max_tau)
+
+
+def _gather_int_rows(t: torch.Tensor) -> torch.Tensor:
+    """Non-differentiable all-gather of an int tensor [B, R] -> [B*world, R]. Returns input off-DDP."""
+    import torch.distributed as dist
+
+    if not (dist.is_available() and dist.is_initialized()) or dist.get_world_size() == 1:
+        return t
+    out = [torch.empty_like(t) for _ in range(dist.get_world_size())]
+    dist.all_gather(out, t.contiguous())
+    return torch.cat(out, dim=0)
+
+
 def hyperbolic_angle_contrastive_loss_ddp(
     img: torch.Tensor, text: torch.Tensor, curv: torch.Tensor | float, scale: torch.Tensor | float,
     class_ids: torch.Tensor | None = None,
@@ -209,6 +248,73 @@ def euclidean_contrastive_loss_ddp(
         text_logits = text_logits.masked_fill(mask, float("-inf"))
     targets = torch.arange(B, device=img.device) + B * rank
     return 0.5 * (F.cross_entropy(img_logits, targets) + F.cross_entropy(text_logits, targets))
+
+
+def stable_lineage_ids(taxonomy_batch, ranks, device):
+    """[B, R] int tensor of per-rank STABLE ids from a taxonomy_batch (coarse->fine rank order).
+    Same string -> same id on every GPU (DETERMINISTIC hash, since Python's built-in hash() is
+    per-process randomised and would break cross-rank shared-depth under DDP); None/'' -> -1
+    (unknown, never matches). Used by ranked (RINCE) CL for graded positives."""
+    import hashlib
+
+    def hid(rank, s):  # deterministic 63-bit id of "rank:value" (rank prefix disambiguates ranks)
+        h = hashlib.blake2b(f"{rank}:{s}".encode(), digest_size=8).digest()
+        return int.from_bytes(h, "big") & 0x7FFFFFFFFFFFFFFF
+
+    B = len(taxonomy_batch[ranks[0]])
+    out = torch.full((B, len(ranks)), -1, dtype=torch.long, device=device)
+    for r, rank in enumerate(ranks):
+        for i, s in enumerate(taxonomy_batch[rank]):
+            if s is not None and s != "":
+                out[i, r] = hid(rank, s)
+    return out
+
+
+def shared_depth_matrix(query_lineages, bank_lineages):
+    """[Q, K] int matrix: number of LEADING ranks shared between query i and bank j (taxonomy
+    order->...->species). 4 = same species, 0 = shares nothing. `*_lineages` are [N, R] LongTensors
+    of per-rank dense ids (rank order coarse->fine); -1 (unknown) never matches (treated distinct)."""
+    q = query_lineages[:, None, :]            # [Q,1,R]
+    k = bank_lineages[None, :, :]             # [1,K,R]
+    eq = (q == k) & (q != -1)                 # [Q,K,R] per-rank equality, unknowns never equal
+    # cumulative AND from the coarsest rank: depth = #leading ranks that all match
+    cum = torch.cumprod(eq.long(), dim=2)     # stays 1 only while every prior rank matched
+    return cum.sum(dim=2)                     # [Q,K] in 0..R
+
+
+def ranked_infonce(sim, depth, max_depth, min_tau=0.1, max_tau=0.5, one_per_rank=True, eps=1e-7):
+    """RINCE-in (Hoffmann 2022, sum_in_log) over taxonomic shared-depth ranks.
+
+    Ported from /home/daniela/other/rince/losses.py (sum_in_log + the per-rank loop), with their
+    CIFAR similarity table replaced by `depth` (our taxonomy shared-depth) and their MoCo memory
+    bank replaced by the in-batch/cache-accum bank already encoded in `sim`.
+
+    Args:
+      sim   : [Q, K] similarity logits h(query_i, bank_j) (already * scale). Higher = more similar.
+      depth : [Q, K] shared taxonomic depth (from shared_depth_matrix), 0..max_depth.
+      max_depth : R (=4 for BIOSCAN). Ranking levels are depths max_depth..1; depth 0 = true negative.
+    Per level d (fine->coarse): positives = {j: depth==d}; negatives (denominator) = positives at
+    this level + everything LESS similar (depth < d, incl. true negatives). Items MORE similar
+    (depth > d) are excluded from both (set to -inf) so they don't act as negatives. RINCE-in:
+    softmax over [pos, neg]; loss = -log(sum of softmax mass on positives). Empty levels skipped.
+
+    tau per level: linear in dissimilarity (their get_dynamic_tau): sim_level = d/max_depth,
+    tau = min_tau + (1 - sim_level)*(max_tau - min_tau) -> coarser ranks get higher tau.
+    `one_per_rank=True` = one loss term per distinct depth level (their best variant).
+    """
+    total = sim.new_zeros(())
+    n_terms = 0
+    for d in range(max_depth, 0, -1):
+        # level d: positives = {depth==d}; denominator = positives + everything LESS similar
+        # (depth<d, incl. true negatives). Items MORE similar (depth>d) -> -inf (excluded from both).
+        logits = sim.masked_fill(depth > d, float("-inf"))
+        tau = min_tau + (1.0 - d / max_depth) * (max_tau - min_tau)  # coarser rank -> higher tau
+        pos_mass = (F.softmax(logits / tau, dim=1) * (depth == d)).sum(dim=1)  # [Q]
+        valid = pos_mass > eps                             # queries with >=1 rank-d positive
+        if valid.any():
+            total = total - torch.log(pos_mass[valid]).mean()  # valid guards log(0); no +eps
+            n_terms += 1
+    return total / max(n_terms, 1)
 
 
 def _cl_logits(kind, img, text, all_img, all_text, curv, scale):

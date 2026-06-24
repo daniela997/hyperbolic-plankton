@@ -43,6 +43,8 @@ from hyperbolic_plankton.loss import (
     euclidean_contrastive_loss_ddp,
     hyperbolic_angle_contrastive_loss_ddp,
     hyperbolic_contrastive_loss_ddp,
+    ranked_contrastive_loss_ddp,
+    stable_lineage_ids,
     stacked_entailment_loss,
 )
 from hyperbolic_plankton.lora import apply_lora, count_trainable
@@ -243,7 +245,7 @@ def encode_cl_features(model, pixel_values, taxonomy_batch, ranks, cl_mask, geom
 def forward_loss(model, pixel_values, taxonomy_batch, lambda_sel, stats=None,
                  sel_indep=True, contrastive="distance", ranks=RANKS,
                  sel_tau=1.0, sel_leak=0.0, sel_uncertainty=0.0, sel_margin=0.0, cl_mask="none", lambda_cl=1.0,
-                 geometry="hyperbolic"):
+                 geometry="hyperbolic", rince_min_tau=0.1, rince_max_tau=0.5):
     """lambda_cl*contrastive(img, deepest_text) + lambda_sel*SEL. `model` may be a DDP
     wrapper; geometry helpers live on the underlying module.
 
@@ -266,13 +268,21 @@ def forward_loss(model, pixel_values, taxonomy_batch, lambda_sel, stats=None,
     # mis-treated as negatives — ~4.4% of pairs in clade-imbalanced plankton batches).
     img, deepest, class_ids, cum_embs = encode_cl_features(
         model, pixel_values, taxonomy_batch, ranks, cl_mask, geometry)
-    if euclidean:
-        cl_fn = euclidean_contrastive_loss_ddp
-    elif contrastive == "angle":
-        cl_fn = hyperbolic_angle_contrastive_loss_ddp
+    if contrastive == "ranked":
+        # RINCE: graded positives by taxonomic shared-depth (geometry-agnostic; works in eucl too)
+        lineage = stable_lineage_ids(taxonomy_batch, ranks, img.device)
+        cl = ranked_contrastive_loss_ddp(
+            img, deepest, lineage, curv, scale,
+            kind=("euclidean" if euclidean else "distance"),
+            max_depth=len(ranks), min_tau=rince_min_tau, max_tau=rince_max_tau)
     else:
-        cl_fn = hyperbolic_contrastive_loss_ddp
-    cl = cl_fn(img, deepest, curv, scale, class_ids=class_ids)
+        if euclidean:
+            cl_fn = euclidean_contrastive_loss_ddp
+        elif contrastive == "angle":
+            cl_fn = hyperbolic_angle_contrastive_loss_ddp
+        else:
+            cl_fn = hyperbolic_contrastive_loss_ddp
+        cl = cl_fn(img, deepest, curv, scale, class_ids=class_ids)
     # SEL is hyperbolic-only (entailment cones); the Euclidean baseline is CL-only.
     if euclidean:
         return lambda_cl * cl, cl.detach(), cl.new_zeros(())
@@ -340,10 +350,17 @@ def main():
                     help="hyperbolic=Lorentz lift + (CL[+SEL]); euclidean=flat CLIP InfoNCE "
                          "baseline (open_clip ClipLoss, cosine; no SEL/lift). The Euclidean-LoRA "
                          "baseline isolates LoRA-vs-full-FT from hyperbolic-vs-Euclidean.")
-    ap.add_argument("--contrastive", default="distance", choices=["distance", "angle"],
+    ap.add_argument("--contrastive", default="distance", choices=["distance", "angle", "ranked"],
                     help="distance=MERU InfoNCE on -pairwise_dist; angle=ATMG exterior-angle "
-                         "InfoNCE (radius-free, same oxy_angle quantity as SEL). "
+                         "InfoNCE (radius-free, same oxy_angle quantity as SEL); ranked=RINCE "
+                         "(Hoffmann 2022) graded-by-taxonomic-depth positives. "
                          "Ignored when --geometry euclidean.")
+    ap.add_argument("--rince-min-tau", type=float, default=0.1,
+                    help="ranked CL: tau at the finest (species) level (sharp, hard negatives).")
+    ap.add_argument("--rince-max-tau", type=float, default=0.5,
+                    help="ranked CL: tau at the coarsest level (relaxed). tau rises with rank "
+                         "dissimilarity (RINCE get_dynamic_tau). ranked needs a big bank "
+                         "(--cache-accum-cl) to populate fine ranks; see docs/rince-plan.md.")
     ap.add_argument("--cl-mask", default="none", choices=["none", "same"],
                     help="mask same-class off-diagonal CL negatives (true positives "
                          "mis-treated as negatives, ~4.4%% of plankton batch pairs). "
@@ -661,6 +678,9 @@ def main():
                           for pv, tb in micros]
             cache_i, cache_t, cache_ids = [c[0] for c in cached], [c[1] for c in cached], [c[2] for c in cached]
             kind = args.geometry if args.geometry == "euclidean" else args.contrastive
+            # ranked CL needs per-micro lineage ids ([B,R]) for the full local set
+            cache_lin = ([stable_lineage_ids(tb, ranks, device) for _, tb in micros]
+                         if args.contrastive == "ranked" else None)
             for micro, (pixel_values, taxonomy_batch) in enumerate(micros):
                 last_micro = micro == args.accum - 1
                 step_stats = sel_terms if (is_log_iter and last_micro and is_main()) else None
@@ -671,11 +691,19 @@ def main():
                     # full local set: fresh micro spliced into its position (OpenCLIP l.154)
                     local_i = torch.cat(cache_i[:micro] + [img] + cache_i[micro + 1:])
                     local_t = torch.cat(cache_t[:micro] + [deepest] + cache_t[micro + 1:])
-                    local_ids = (torch.cat(cache_ids[:micro] + [class_ids] + cache_ids[micro + 1:])
-                                 if class_ids is not None else None)
-                    cl = accum_contrastive_loss_ddp(
-                        kind, local_i, local_t, core.curvature, core.logit_scale.exp(),
-                        local_ids=local_ids)
+                    if args.contrastive == "ranked":
+                        local_lin = torch.cat(cache_lin)  # [accum*mb, R]; fresh-vs-cached identical ids
+                        cl = ranked_contrastive_loss_ddp(
+                            local_i, local_t, local_lin, core.curvature, core.logit_scale.exp(),
+                            kind=("euclidean" if args.geometry == "euclidean" else "distance"),
+                            max_depth=len(ranks),
+                            min_tau=args.rince_min_tau, max_tau=args.rince_max_tau)
+                    else:
+                        local_ids = (torch.cat(cache_ids[:micro] + [class_ids] + cache_ids[micro + 1:])
+                                     if class_ids is not None else None)
+                        cl = accum_contrastive_loss_ddp(
+                            kind, local_i, local_t, core.curvature, core.logit_scale.exp(),
+                            local_ids=local_ids)
                     # SEL per micro-batch via forward_loss's SEL branch (lambda_cl=0 → SEL grad only).
                     sel = cl.new_zeros(())
                     if args.geometry != "euclidean" and args.lambda_sel > 0:
@@ -715,6 +743,7 @@ def main():
                         sel_uncertainty=args.sel_uncertainty, sel_margin=args.sel_margin,
                         cl_mask=args.cl_mask,
                         lambda_cl=args.lambda_cl, geometry=args.geometry,
+                        rince_min_tau=args.rince_min_tau, rince_max_tau=args.rince_max_tau,
                     )
                     loss = loss / args.accum
                 scaler.scale(loss).backward()
