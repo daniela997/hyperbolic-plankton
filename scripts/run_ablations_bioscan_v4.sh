@@ -7,8 +7,11 @@
 # seed 0 / fp16 / --cache-accum-cl. micro-bs 64 / accum 6 (eff batch 768; micro-bs 128 OOMs with
 # cache-accum). vs v3 the only recipe change is wd 1e-3 -> 1e-4 (cache-accum wants less decay).
 #
+# Eval every 5 epochs (--eval-epochs 5.0) to save time; _best.pt = best of those evals, _final.pt
+# always saved. E (Euclidean) skipped (v3 E is the baseline). 17 configs.
+#
 # Two blocks:
-#  (1) C0-C10 + Euclidean — the loss ablation, now on the cache-accum (768-neg) objective.
+#  (1) C0-C10 — the loss ablation, now on the cache-accum (768-neg) objective.
 #  (2) RINCE sub-grid — ranked-positive CL (graded by taxonomic depth, geometry-agnostic
 #      alternative to SEL cones): ranked x {CL-only, +SEL-indep, +SEL-cumul} x {distance,angle sim}.
 #
@@ -33,16 +36,16 @@ run() {
         --lr 2.5e-4 --wd 1e-4 --optimizer adam --scheduler onecycle \
         --onecycle-pct-start 0.3 --onecycle-min-lr 1e-6 \
         --lora-r 64 --lora-visual-blocks 12 --lora-text-blocks 12 \
-        --seed 0 --compile --eval-epochs 1.0 \
+        --seed 0 --compile --eval-epochs 5.0 \
         "$@" \
         --tag "$TAG"; then
         echo "⚠️  $TAG FAILED (exit $?) — continuing to next config"
     fi
 }
 
-# ============================ (1) C0-C10 + Euclidean ============================
-run "bioscan_E_euclidean_r64_v4" \
-    --geometry euclidean --lambda-cl 1.0 --cl-mask none
+# ============================ (1) C0-C10 (loss ablation) ============================
+# E (Euclidean) SKIPPED — v3's E (seen 0.765) is the baseline; flat CLIP doesn't use the
+# cache-accum hierarchy, so re-running it at v4 adds little. Re-add if a v4 E control is wanted.
 
 run "bioscan_B0_baseline_r64_v4" \
     --lambda-cl 1.0 --lambda-sel 1.0 --contrastive distance --cl-mask none --sel-text independent
