@@ -2,7 +2,8 @@
 # BIOSCAN ablation ladder — V4: cache-accum CL (true 768-way InfoNCE) + the RINCE sub-grid.
 #
 # Recipe LOCKED from the v4 cache-accum sweep (zojuv2lz, best trial seen 0.640 @ 50ep, beats the
-# v3 80ep B0 0.628): adam / onecycle / lr 2.32e-4 / wd 1e-4 / r64 / 12+12 blocks / 50 epochs /
+# v3 80ep B0 0.628): adam / onecycle / lr 2.5e-4 (sweep best 2.32e-4, rounded) / wd 1e-4 / r64 /
+# 12+12 blocks / 50 epochs /
 # seed 0 / fp16 / --cache-accum-cl. micro-bs 64 / accum 6 (eff batch 768; micro-bs 128 OOMs with
 # cache-accum). vs v3 the only recipe change is wd 1e-3 -> 1e-4 (cache-accum wants less decay).
 #
@@ -29,7 +30,7 @@ run() {
     echo "=================================================================="
     if ! PYTHONPATH=src "$TORCHRUN" --nproc_per_node=2 --master_port=29557 scripts/train_lora.py \
         --dataset bioscan --backbone clip --epochs 50 --micro-bs 64 --accum 6 --cache-accum-cl \
-        --lr 2.32e-4 --wd 1e-4 --optimizer adam --scheduler onecycle \
+        --lr 2.5e-4 --wd 1e-4 --optimizer adam --scheduler onecycle \
         --onecycle-pct-start 0.3 --onecycle-min-lr 1e-6 \
         --lora-r 64 --lora-visual-blocks 12 --lora-text-blocks 12 \
         --seed 0 --compile --eval-epochs 1.0 \
