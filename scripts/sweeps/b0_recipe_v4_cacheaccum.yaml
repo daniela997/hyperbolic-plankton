@@ -41,8 +41,10 @@ command:
   - --dataset=bioscan
   - --backbone=clip
   - --epochs=50
-  - --micro-bs=128
-  - --accum=3
+  # cache-accum holds all accum micro-batches' features + builds the full 768-row bank, so
+  # micro-bs=128 OOMs on 24GB. micro-bs=64/accum=6 keeps eff batch 64*6*2=768 and fits.
+  - --micro-bs=64
+  - --accum=6
   - --cache-accum-cl
   - --lora-r=64
   - --lora-visual-blocks=12
