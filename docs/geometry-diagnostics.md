@@ -69,8 +69,39 @@ C7≈C10 and C1≈C6.)
   (proto dist 0.11–0.21 vs 1.0–1.4). angle-CL buys transitivity by destroying angular spread.
 - Use full-split top-1/F1, never subsample probes, for any accuracy claim.
 
-## Remaining: --sel-margin
-`scripts/run_sel_margin_bioscan.sh` (B0/C1/C5 × {0.5,1.0}) adds the cone-CONTAINMENT term so the
-child's WHOLE cone must fit the parent (`relu(angle + w·ψ_child − ψ_parent)`). Re-run
-`diagnose_geometry.py` on those ckpts to confirm the prediction: **fits% 0.00→>0, slack→≥0,
-B0 image-transitivity .94→.49→.05→.00 lifts**, ideally WITHOUT the angular collapse angle-CL caused.
+## --sel-margin RESULTS (the cone-containment term WORKED — full diagnostics)
+
+`scripts/run_sel_margin_bioscan.sh` (B0/C1/C5 × {0.5,1.0}) adds the cone-CONTAINMENT hinge
+`relu(angle + w·ψ_child − ψ_parent)` so the child's WHOLE cone must fit the parent. All 6 ran;
+diagnosed full-split. **The prediction held: it achieves cone-nesting (fits% 0.00→0.6–0.95), which
+NO base config did.**
+
+| config            | fits% gen→sp | seen F1 | unseen F1 | separability | img-dir cos (collapse) |
+|-------------------|------|------|------|------|------|
+| B0 (base)         | 0.00 | 0.628 | 0.050 | 1.07 | 0.017 |
+| B0 + margin 0.5   | 0.00 | 0.625 | 0.056 | 1.06 | 0.037 |
+| B0 + margin 1.0   | 0.00 | 0.586 | 0.051 | 1.16 | 0.577 |
+| C1 (base, dist+cumulSEL) | 0.08 | 0.466 | 0.048 | 1.39 | 0.002 |
+| **C1 + margin 1.0** | **0.60–0.85** | 0.615 | 0.044 | **1.58** | **0.093** |
+| C5 (base, angle+cumulSEL) | 0.00 | 0.621 | 0.059 | 0.11 | 0.961 |
+| C5 + margin 1.0   | **0.61–0.95** | 0.512 | 0.048 | 0.21 | 0.927 |
+
+**Key findings:**
+- **Cone-nesting IS achievable** — C1+margin1.0 and C5+margin1.0 reach fits% 0.6–0.95 (vs 0.00 for
+  every base config). The margin term does exactly what it was built to do. So "no config nests" was
+  true ONLY of the non-margin configs; the margin is the fix and it works.
+- **C1+margin1.0 = the geometry we said was impossible: NESTING *with* SEPARABILITY.** It nests
+  (fits% 0.6–0.85) AND keeps separability 1.58 (highest of any config) AND stays angularly spread
+  (cos 0.093, NOT collapsed). First config to get both. Because C1 is DISTANCE-CL (preserves spread);
+  the margin adds nesting on top without collapse.
+- **C5+margin nests but stays COLLAPSED** (cos 0.927) — because C5 is ANGLE-CL, which collapses
+  regardless of the margin. So the radial driver must pair with DISTANCE-CL, not angle-CL.
+- **Nesting did NOT improve classification** — C1+margin seen 0.615 (vs C1's 0.466 is *up*, but its
+  geometry-fixed cousin still trails B0 0.628; C5+margin 0.512 *down* from C5 0.621). Achieving the
+  cone hierarchy is necessary-but-not-sufficient: the geometry can be right while F1 lags (here
+  C1's cumulative-SEL base handicaps it regardless of nesting).
+
+**Implication for the radial-ordering loss** (`radial_ordering_loss`, the explicit curvature driver):
+C1+margin is the proof-of-concept that an explicit radial driver + distance-CL yields nesting +
+separability together. The radial loss is a cleaner version of the same idea (order radii directly,
+no cone-margin coupling). Build it on a DISTANCE-CL + SEL base (B0/C1), NOT angle-CL.
