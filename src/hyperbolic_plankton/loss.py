@@ -34,6 +34,7 @@ __all__ = [
     "ranked_infonce",
     "shared_depth_matrix",
     "stable_lineage_ids",
+    "radial_ordering_loss",
 ]
 
 
@@ -248,6 +249,39 @@ def euclidean_contrastive_loss_ddp(
         text_logits = text_logits.masked_fill(mask, float("-inf"))
     targets = torch.arange(B, device=img.device) + B * rank
     return 0.5 * (F.cross_entropy(img_logits, targets) + F.cross_entropy(text_logits, targets))
+
+
+def radial_ordering_loss(text_embs, img, ranks, curv, margin=0.2):
+    """Radial-ordering driver: push each level's MEAN radius to INCREASE down the hierarchy
+    (order < family < ... < species < image). Generalises ATMG's 2-level L_centroid (text centroid
+    nearer origin than image centroid, paper Eq. 12) to our per-rank hierarchy.
+
+    Why: SEL is satisfied-by-collapse (zero curvature gradient once origin-collapsed), so nothing
+    drives the radial spread that the cone hierarchy needs (analytically feasible only at curv≳4;
+    see docs/curvature-feasibility.md). This term's gradient EXPLICITLY pushes coarse ranks inward
+    and fine ranks/images outward — the radial driver SEL lacks — coupling to higher curvature.
+
+    Uses MEAN per-point radius per level, NOT the Einstein-centroid radius: the centroid radius
+    SATURATES at large radius (Klein compression + direction-cancellation), so it can't distinguish
+    the fine ranks (genus/species/image all compress to ~the same centroid radius) — exactly where
+    we need the spread. Mean radius tracks the shell radius without saturating.
+
+    For each consecutive level pair (coarser, finer): `relu(ρ̄(coarser) − ρ̄(finer) + margin)`,
+    ρ̄ = mean distance_from_origin. Zero only when each finer level is ≥ margin further out; cannot
+    be satisfied by collapse (all radii equal → all hinges active). Returns a scalar.
+    """
+    radii = []
+    for r in ranks:
+        if r in text_embs and bool(text_embs[f"{r}_valid"].any()):
+            v = text_embs[f"{r}_valid"]
+            radii.append(L.distance_from_origin(text_embs[r][v], curv).mean())
+    radii.append(L.distance_from_origin(img, curv).mean())  # image = deepest level
+    if len(radii) < 2:
+        return img.new_zeros(())
+    loss = img.new_zeros(())
+    for coarser, finer in zip(radii[:-1], radii[1:]):
+        loss = loss + F.relu(coarser - finer + margin)
+    return loss / (len(radii) - 1)
 
 
 def stable_lineage_ids(taxonomy_batch, ranks, device):

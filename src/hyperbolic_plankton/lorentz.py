@@ -36,6 +36,7 @@ __all__ = [
     "half_aperture",
     "oxy_angle",
     "distance_from_origin",
+    "einstein_midpoint",
 ]
 
 
@@ -134,6 +135,27 @@ def distance_from_origin(
     rc_x_time = torch.sqrt(1 + curv * torch.sum(x**2, dim=-1))
     distance = torch.acosh(torch.clamp(rc_x_time, min=1 + eps))
     return distance / curv**0.5
+
+
+@_fp32
+def einstein_midpoint(x: Tensor, curv: float | Tensor = 1.0) -> Tensor:
+    """Einstein (Klein) midpoint of a set of hyperboloid points -> space components `(D,)`.
+
+    The proper hyperbolic centroid: project to the Klein model (`v = x / x_time`), take the
+    Lorentz-factor-weighted mean of the Klein coordinates (the Lorentz factor in this hyperboloid
+    convention is the time component `x_time = sqrt(1/curv + ||x||^2)`), then map back. `x` is
+    `(N, D)` space components; returns the midpoint's space components, whose `distance_from_origin`
+    is the centroid radius used by the radial-ordering loss.
+
+    (ATMG `models.py::einstein_loss` has bugs here — it weights raw features not Klein coords and
+    uses ||x||^4 in the factor; it is also disabled in their forward. We implement the correct form.)
+    """
+    x_time = torch.sqrt(1 / curv + torch.sum(x**2, dim=-1, keepdim=True))  # Lorentz factor γ
+    klein = x / x_time                                     # Klein coordinates
+    klein_avg = (klein * x_time).sum(0) / x_time.sum(0)    # γ-weighted Klein mean -> [D]
+    # map Klein point back to hyperboloid space components: x = v / sqrt(1 - curv*||v||^2)
+    kn2 = torch.sum(klein_avg**2)
+    return klein_avg / torch.sqrt(torch.clamp(1 - curv * kn2, min=1e-8))
 
 
 @_fp32
