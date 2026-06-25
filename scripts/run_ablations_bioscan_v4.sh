@@ -47,14 +47,19 @@ run() {
 # E (Euclidean) SKIPPED — v3's E (seen 0.765) is the baseline; flat CLIP doesn't use the
 # cache-accum hierarchy, so re-running it at v4 adds little. Re-add if a v4 E control is wanted.
 
+# RESUME (independent-text fix 4c3528d): re-run the configs that used INDEPENDENT SEL text
+# (B0, C3 — trained with the old 'Rank:' prefix, now invalid). E/C1/C2 already completed and are
+# VALID (E=no SEL; C1/C2=cumulative text, unaffected by the fix) -> commented out, kept on disk.
 run "bioscan_B0_baseline_r64_v4" \
     --lambda-cl 1.0 --lambda-sel 1.0 --contrastive distance --cl-mask none --sel-text independent
 
-run "bioscan_C1_seltext_cumulative_r64_v4" \
-    --lambda-cl 1.0 --lambda-sel 1.0 --contrastive distance --cl-mask none --sel-text cumulative
+# C1 done + valid (cumulative): skip
+# run "bioscan_C1_seltext_cumulative_r64_v4" \
+#     --lambda-cl 1.0 --lambda-sel 1.0 --contrastive distance --cl-mask none --sel-text cumulative
 
-run "bioscan_C2_selonly_cumulative_r64_v4" \
-    --lambda-cl 0.0 --lambda-sel 1.0 --contrastive distance --cl-mask none --sel-text cumulative
+# C2 done + valid (cumulative): skip
+# run "bioscan_C2_selonly_cumulative_r64_v4" \
+#     --lambda-cl 0.0 --lambda-sel 1.0 --contrastive distance --cl-mask none --sel-text cumulative
 
 run "bioscan_C3_selonly_independent_r64_v4" \
     --lambda-cl 0.0 --lambda-sel 1.0 --contrastive distance --cl-mask none --sel-text independent
