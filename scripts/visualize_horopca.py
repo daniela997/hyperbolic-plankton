@@ -63,6 +63,13 @@ def main():
     ap.add_argument("--n", type=int, default=400, help="#samples (images) to plot")
     ap.add_argument("--out", default="/scratch/daniela/horopca.png")
     ap.add_argument("--sel-text", default="independent", choices=["independent", "cumulative"])
+    ap.add_argument("--split", default="test_seen", choices=["test_seen", "test_unseen"],
+                    help="bioscan split to visualise (seen = trained classes, unseen = novel lineages)")
+    ap.add_argument("--indep-prefix", action="store_true",
+                    help="reconstruct the v3-era 'Rank: Value' independent text (e.g. 'Order: Diptera'). "
+                         "data.py now emits BARE values (paper-faithful), but v3/independent-SEL "
+                         "checkpoints (e.g. B0) were TRAINED with the prefix — set this to encode the "
+                         "text form the model actually learned. No-op for --sel-text cumulative.")
     args = ap.parse_args()
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -81,7 +88,7 @@ def main():
 
         ranks = BIOSCAN_RANKS
         BIOSCAN_HDF5 = "/scratch/daniela/bioscan1m/data/BIOSCAN_1M/split_data/BioScan_data_in_splits.hdf5"
-        full = BioscanHDF5Dataset(BIOSCAN_HDF5, "test_seen")
+        full = BioscanHDF5Dataset(BIOSCAN_HDF5, args.split)
         sel = np.random.default_rng(0).choice(len(full), size=args.n, replace=False)
         items = [full[int(i)] for i in sel]
     else:
@@ -92,6 +99,15 @@ def main():
         ds = HFTaxonomyDataset(cache.select(sorted(sel.tolist())))
         items = [ds[i] for i in range(len(ds))]
     pix, tax, _ = TaxonomyCollator(model.preprocess, ranks=ranks)(items)
+
+    # v3 / independent-SEL checkpoints were trained with the 'Rank: Value' independent text
+    # (data.py now emits bare values). Reconstruct the trained prefix so we encode what the model
+    # learned. Only affects the independent text form (cumulative is unchanged).
+    if args.indep_prefix and args.sel_text == "independent":
+        for r in ranks:
+            key = f"{r}_indep"
+            if key in tax:
+                tax[key] = [f"{r.capitalize()}: {v}" if v not in (None, "") else v for v in tax[key]]
 
     # encode: images + each rank's text (cumulative/independent), all on the hyperboloid.
     # no_grad here only — HoroPCA.fit below needs autograd for its projection optimisation.
