@@ -53,8 +53,9 @@ def build_taxonomy(row: dict, rank_columns: list[str] = _HF_RANK_COLUMNS) -> dic
       - `{rank}` = **cumulative** lineage through that rank (e.g. family =
         "kingdom phylum class order family") — the paper's `tax_label`/`full` class string,
         used by the contrastive loss, SEL-inter, and eval/prediction.
-      - `{rank}_indep` = **independent** per-rank text in the paper's "Rank: Value" form
-        (e.g. "Family: fragilariaceae") — used by SEL-intra. The paper (§3.1, Eq. 3 `T_r`)
+      - `{rank}_indep` = **independent** per-rank text = the bare rank value (e.g. "fragilariaceae"),
+        paper-faithful (Table 2: per-rank labels are bare values, no "Rank:" prefix) — used by
+        SEL-intra. The paper (§3.1, Eq. 3 `T_r`)
         encodes ranks independently and designs SEL for the "non-overlapping" hierarchy;
         cumulative text makes consecutive ranks near-collinear (cos 0.6–0.94), starving
         SEL of radial-separation gradient and driving curvature collapse. Independent text
@@ -76,7 +77,7 @@ def build_taxonomy(row: dict, rank_columns: list[str] = _HF_RANK_COLUMNS) -> dic
         if val is not None:
             cumulative.append(val)
             taxonomy[key] = " ".join(cumulative)
-            taxonomy[f"{key}_indep"] = f"{col}: {val}"
+            taxonomy[f"{key}_indep"] = val  # bare value, paper-faithful (Table 2: no "Rank:" prefix)
             valid_ranks.append(key)
         else:
             taxonomy[key] = None
