@@ -729,8 +729,11 @@ def main():
                     # full-set gradient exactly once. SEL is genuinely per-micro -> /accum to average.
                     loss = args.lambda_cl * cl + sel_loss / args.accum
                 scaler.scale(loss).backward()
-                run_loss += loss.item()
-                run_cl += cl.item() / args.accum   # log the per-micro-equivalent CL (cl is summed)
+                # log per-micro-normalised so the displayed loss ≈ cl + lambda_sel*sel: cl is the
+                # accum-summed full-set CE, so /accum here to match cl/sel; the BACKWARD'd loss above
+                # keeps cl un-divided by design (OpenCLIP) — this is logging only, not the gradient.
+                run_loss += cl.item() / args.accum + args.lambda_sel * sel_val / args.accum
+                run_cl += cl.item() / args.accum
                 run_sel += sel_val
         else:
             # standard accumulation: CL negatives = micro_bs * world per micro-batch
