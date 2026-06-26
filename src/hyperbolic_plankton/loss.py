@@ -160,8 +160,13 @@ def ranked_contrastive_loss_ddp(
         all_lin = _gather_int_rows(lineage_ids)                # [B*world, R], non-diff
     else:
         all_text, all_lin = text, lineage_ids
-    # image-vs-all-text similarity (same orientation as the *_ddp CL: query=image)
+    # image-vs-all-text similarity (query=image). ranked_infonce requires "higher sim = more
+    # similar". _cl_logits' image side gives -dist (✓ higher=closer) but +oxy_angle for angle
+    # (larger angle = LESS similar) — negate it so the convention holds (else ranked learns the
+    # INVERTED ranking: loss→0 by ranking dissimilar texts as positives, but F1=0).
     sim, _ = _cl_logits(kind, img, text, img, all_text, curv, scale)   # [B, B*world]
+    if kind == "angle":
+        sim = -sim
     depth = shared_depth_matrix(lineage_ids, all_lin)          # [B, B*world]
     return ranked_infonce(sim, depth, max_depth=max_depth, min_tau=min_tau, max_tau=max_tau)
 
