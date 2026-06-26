@@ -25,9 +25,16 @@ cd /home/daniela/mine/hyperbolic-plankton
 PY=/scratch/daniela/miniconda3/envs/dino_plankton/bin/python
 TORCHRUN=/scratch/daniela/miniconda3/envs/dino_plankton/bin/torchrun
 
+CKDIR=/scratch/daniela/hyperbolic_plankton_ckpts
+
 # NO `set -e`: one config crashing (e.g. a NaN) must NOT abort the whole ladder.
 run() {
     local TAG=$1; shift
+    # idempotent resume: skip if a completed _final.pt already exists for this tag
+    if ls "$CKDIR/${TAG}__"*/"${TAG}_final.pt" >/dev/null 2>&1; then
+        echo "⏭️  $TAG already done (final.pt exists) — skipping"
+        return
+    fi
     echo -e "\n=================================================================="
     echo "🚀 $TAG"
     echo "=================================================================="
@@ -101,4 +108,21 @@ for SIM in distance angle; do
         --contrastive ranked --rince-sim $SIM --lambda-cl 1.0 --lambda-sel 1.0 --sel-text cumulative
 done
 
-echo -e "\n✅ BIOSCAN v4 ladder (C0-C10 + Euclidean + RINCE sub-grid) complete."
+# ============================ (3) LRCL sub-grid ============================
+# Level-Restricted CL (Tao 2026, "Beyond Flat Labels"): per-level unique-label InfoNCE, the
+# PARTITIONING alternative to RINCE's grading. With cache-accum (LRCL is symmetric -> T->I needs
+# the full image negative set). lrcl-ranks: species = generic single-level baseline; all = multirank.
+
+# L1: generic single-level (unique-label + group-balanced) InfoNCE baseline (CL-only)
+run "bioscan_L_lrcl_species_r64_v4" \
+    --contrastive level-restricted --lrcl-ranks species --lambda-cl 1.0 --lambda-sel 0.0
+
+# L2: full multi-rank LRCL (the paper's method, CL-only)
+run "bioscan_L_lrcl_all_r64_v4" \
+    --contrastive level-restricted --lrcl-ranks all --lambda-cl 1.0 --lambda-sel 0.0
+
+# L3: full LRCL + SEL independent (does the entailment hierarchy add anything on top of LRCL?)
+run "bioscan_L_lrcl_all_selindep_r64_v4" \
+    --contrastive level-restricted --lrcl-ranks all --lambda-cl 1.0 --lambda-sel 1.0 --sel-text independent
+
+echo -e "\n✅ BIOSCAN v4 ladder (C0-C10 + Euclidean + RINCE + LRCL sub-grids) complete."
