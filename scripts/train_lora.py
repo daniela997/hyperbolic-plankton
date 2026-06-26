@@ -43,6 +43,7 @@ from hyperbolic_plankton.loss import (
     euclidean_contrastive_loss_ddp,
     hyperbolic_angle_contrastive_loss_ddp,
     hyperbolic_contrastive_loss_ddp,
+    level_restricted_accum,
     level_restricted_loss,
     ranked_contrastive_loss_ddp,
     stable_lineage_ids,
@@ -699,23 +700,32 @@ def main():
             # ranked CL needs per-micro lineage ids ([B,R]) for the full local set
             cache_lin = ([stable_lineage_ids(tb, ranks, device) for _, tb in micros]
                          if args.contrastive == "ranked" else None)
+            # LRCL needs the per-rank cumulative text embeddings (c[3]=cum_embs) for the full local set
+            cache_cum = ([c[3] for c in cached] if args.contrastive == "level-restricted" else None)
             for micro, (pixel_values, taxonomy_batch) in enumerate(micros):
                 last_micro = micro == args.accum - 1
                 step_stats = sel_terms if (is_log_iter and last_micro and is_main()) else None
                 with torch.amp.autocast("cuda"):
-                    img, deepest, class_ids, _ = encode_cl_features(
+                    img, deepest, class_ids, cum_fresh = encode_cl_features(
                         ddp_model, pixel_values, taxonomy_batch, ranks, args.cl_mask, args.geometry)
                     core = ddp_model.module if ddp else ddp_model
                     # full local set: fresh micro spliced into its position (OpenCLIP l.154)
                     local_i = torch.cat(cache_i[:micro] + [img] + cache_i[micro + 1:])
                     local_t = torch.cat(cache_t[:micro] + [deepest] + cache_t[micro + 1:])
                     if args.contrastive == "level-restricted":
-                        # LRCL's negatives are UNIQUE LABELS per level, not samples — the cache-accum
-                        # sample-bank trick doesn't apply. Run LRCL on the standard path (plain accum),
-                        # as the paper does (batch 4096, no GradCache).
-                        raise SystemExit("--contrastive level-restricted is incompatible with "
-                                         "--cache-accum-cl; run without it (use a larger --micro-bs).")
-                    if args.contrastive == "ranked":
+                        # LRCL is symmetric (T->I scores texts vs ALL IMAGES) so it needs the image
+                        # GradCache too. Splice the fresh per-rank texts into the cached full set;
+                        # build the full-set labels in spliced order.
+                        lr_ranks = ranks if args.lrcl_ranks == "all" else ranks[-1:]
+                        local_cum = {r: torch.cat([cache_cum[k][r] if k != micro else cum_fresh[r]
+                                                   for k in range(args.accum)]) for r in lr_ranks}
+                        local_lab = {r: [lab for k in range(args.accum)
+                                         for lab in micros[k][1][r]] for r in lr_ranks}
+                        cl = level_restricted_accum(
+                            local_i, local_cum, local_lab, lr_ranks, core.curvature,
+                            core.logit_scale.exp(),
+                            sim=("euclidean" if args.geometry == "euclidean" else "distance"))
+                    elif args.contrastive == "ranked":
                         local_lin = torch.cat(cache_lin)  # [accum*mb, R]; fresh-vs-cached identical ids
                         cl = ranked_contrastive_loss_ddp(
                             local_i, local_t, local_lin, core.curvature, core.logit_scale.exp(),

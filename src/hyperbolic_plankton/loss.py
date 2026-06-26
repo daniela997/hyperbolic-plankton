@@ -36,6 +36,7 @@ __all__ = [
     "stable_lineage_ids",
     "radial_ordering_loss",
     "level_restricted_loss",
+    "level_restricted_accum",
 ]
 
 
@@ -466,6 +467,70 @@ def accum_contrastive_loss_ddp(
         text_logits = text_logits.masked_fill(mask, float("-inf"))
     targets = torch.arange(N, device=local_img.device) + N * rank  # local block's diagonal
     return 0.5 * (F.cross_entropy(img_logits, targets) + F.cross_entropy(text_logits, targets))
+
+
+def level_restricted_accum(local_img, local_text_per_rank, local_labels_per_rank, ranks,
+                           curv, scale, sim="distance", tau=1.0):
+    """Accumulation-aware LRCL for one grad-pass micro-step (same GradCache pattern as
+    `accum_contrastive_loss_ddp`). LRCL is SYMMETRIC: its T->I direction scores each label-text
+    against ALL IMAGES, so — like plain CL — the image negatives must span the full effective
+    batch, requiring the cache-recompute.
+
+    `local_img` [N,D] is the FULL local set (cat(cached[:j]+[fresh_j]+cached[j+1:]), N=accum*mb),
+    only the active micro's slice carries grad. `local_text_per_rank` = {rank: [N,D]} the per-rank
+    cumulative text embeddings for the SAME full local set (also fresh-spliced). `local_labels_per_rank`
+    = {rank: [N] list of label strings} for dedup. Cross-rank: gather images + per-rank texts + labels
+    non-differentiably, splice the local grad-slice back in (OpenCLIP gather_with_grad=False)."""
+    import torch.distributed as dist
+    ddp = dist.is_available() and dist.is_initialized() and dist.get_world_size() > 1
+    all_img = _gather_local_loss(local_img)              # [N*world, D]; local slice keeps grad
+    total = local_img.new_zeros(())
+    n = 0
+    for r in ranks:
+        if r not in local_text_per_rank:
+            continue
+        all_text = _gather_local_loss(local_text_per_rank[r])      # [N*world, D]
+        labels = (_gather_str(local_labels_per_rank[r]) if ddp else local_labels_per_rank[r])
+        keep = [i for i in range(len(labels)) if labels[i] is not None]
+        if len(keep) < 2:
+            continue
+        lab = [labels[i] for i in keep]
+        uniq = list(dict.fromkeys(lab))
+        if len(uniq) < 2:
+            continue
+        pos = {u: j for j, u in enumerate(uniq)}
+        target = torch.tensor([pos[labels[i]] for i in keep], device=all_img.device)  # [Nk]
+        keep_t = torch.tensor(keep, device=all_img.device)
+        # one text per unique label; .index picks the FIRST occurrence (a grad-carrying copy if the
+        # label is in the active micro, since fresh is spliced before its cached duplicates only when
+        # active — acceptable: same string -> same embedding, grad flows via the active copies).
+        uemb = all_text[keep_t][[lab.index(u) for u in uniq]]      # [U, D]
+        im = all_img[keep_t]                                        # [Nk, D]
+        if sim == "euclidean":
+            s = scale * F.normalize(im, dim=-1) @ F.normalize(uemb, dim=-1).T
+        elif sim == "angle":
+            s = L.pairwise_oxy_angle(im, uemb, curv) * scale
+        else:
+            s = -L.pairwise_dist(im, uemb, curv) * scale            # [Nk, U]
+        s = s / tau
+        i2t = F.cross_entropy(s, target)
+        logp = F.log_softmax(s.T, dim=1)                            # [U, Nk]; T->I over all images
+        t2i_terms = [-logp[u, target == u].mean() for u in range(len(uniq)) if (target == u).any()]
+        t2i = torch.stack(t2i_terms).mean() if t2i_terms else s.new_zeros(())
+        total = total + 0.5 * (i2t + t2i)
+        n += 1
+    return total / max(n, 1)
+
+
+def _gather_str(lst):
+    """All-gather a list of (hashable) label strings across ranks -> concatenated list. Non-diff."""
+    import torch.distributed as dist
+
+    if not (dist.is_available() and dist.is_initialized()) or dist.get_world_size() == 1:
+        return lst
+    out = [None] * dist.get_world_size()
+    dist.all_gather_object(out, lst)
+    return [x for sub in out for x in sub]
 
 
 def entailment_pos(
