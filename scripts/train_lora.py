@@ -43,6 +43,7 @@ from hyperbolic_plankton.loss import (
     euclidean_contrastive_loss_ddp,
     hyperbolic_angle_contrastive_loss_ddp,
     hyperbolic_contrastive_loss_ddp,
+    level_restricted_loss,
     ranked_contrastive_loss_ddp,
     stable_lineage_ids,
     stacked_entailment_loss,
@@ -245,7 +246,8 @@ def encode_cl_features(model, pixel_values, taxonomy_batch, ranks, cl_mask, geom
 def forward_loss(model, pixel_values, taxonomy_batch, lambda_sel, stats=None,
                  sel_indep=True, contrastive="distance", ranks=RANKS,
                  sel_tau=1.0, sel_leak=0.0, sel_uncertainty=0.0, sel_margin=0.0, cl_mask="none", lambda_cl=1.0,
-                 geometry="hyperbolic", rince_min_tau=0.1, rince_max_tau=0.5, rince_sim="distance"):
+                 geometry="hyperbolic", rince_min_tau=0.1, rince_max_tau=0.5, rince_sim="distance",
+                 lrcl_ranks="all"):
     """lambda_cl*contrastive(img, deepest_text) + lambda_sel*SEL. `model` may be a DDP
     wrapper; geometry helpers live on the underlying module.
 
@@ -276,6 +278,13 @@ def forward_loss(model, pixel_values, taxonomy_batch, lambda_sel, stats=None,
         cl = ranked_contrastive_loss_ddp(
             img, deepest, lineage, curv, scale, kind=rkind,
             max_depth=len(ranks), min_tau=rince_min_tau, max_tau=rince_max_tau)
+    elif contrastive == "level-restricted":
+        # LRCL (Tao 2026): per-level InfoNCE, unique-label + group-balanced. lrcl_ranks="species"
+        # = the generic single-level (unique-label group-balanced) baseline; "all" = full multi-rank.
+        lr_ranks = ranks if lrcl_ranks == "all" else [r for r in ranks if r == "species"] or ranks[-1:]
+        cl = level_restricted_loss(
+            img, cum_embs, taxonomy_batch, lr_ranks, curv, scale,
+            sim=("euclidean" if euclidean else "distance"))
     else:
         if euclidean:
             cl_fn = euclidean_contrastive_loss_ddp
@@ -351,11 +360,16 @@ def main():
                     help="hyperbolic=Lorentz lift + (CL[+SEL]); euclidean=flat CLIP InfoNCE "
                          "baseline (open_clip ClipLoss, cosine; no SEL/lift). The Euclidean-LoRA "
                          "baseline isolates LoRA-vs-full-FT from hyperbolic-vs-Euclidean.")
-    ap.add_argument("--contrastive", default="distance", choices=["distance", "angle", "ranked"],
+    ap.add_argument("--contrastive", default="distance",
+                    choices=["distance", "angle", "ranked", "level-restricted"],
                     help="distance=MERU InfoNCE on -pairwise_dist; angle=ATMG exterior-angle "
-                         "InfoNCE (radius-free, same oxy_angle quantity as SEL); ranked=RINCE "
-                         "(Hoffmann 2022) graded-by-taxonomic-depth positives. "
-                         "Ignored when --geometry euclidean.")
+                         "InfoNCE; ranked=RINCE (Hoffmann 2022) graded-by-taxonomic-depth positives; "
+                         "level-restricted=LRCL (Tao 2026) per-level unique-label InfoNCE. "
+                         "Ignored when --geometry euclidean (except level-restricted, which has a "
+                         "euclidean similarity path).")
+    ap.add_argument("--lrcl-ranks", default="all", choices=["all", "species"],
+                    help="level-restricted CL: 'all' = full multi-rank LRCL; 'species' = the "
+                         "generic single-level (unique-label, group-balanced) InfoNCE baseline.")
     ap.add_argument("--rince-sim", default="distance", choices=["distance", "angle"],
                     help="ranked CL similarity h(q,p): distance (-pairwise_dist) or angle "
                          "(oxy_angle). Ignored unless --contrastive ranked (and not euclidean).")
@@ -695,6 +709,12 @@ def main():
                     # full local set: fresh micro spliced into its position (OpenCLIP l.154)
                     local_i = torch.cat(cache_i[:micro] + [img] + cache_i[micro + 1:])
                     local_t = torch.cat(cache_t[:micro] + [deepest] + cache_t[micro + 1:])
+                    if args.contrastive == "level-restricted":
+                        # LRCL's negatives are UNIQUE LABELS per level, not samples — the cache-accum
+                        # sample-bank trick doesn't apply. Run LRCL on the standard path (plain accum),
+                        # as the paper does (batch 4096, no GradCache).
+                        raise SystemExit("--contrastive level-restricted is incompatible with "
+                                         "--cache-accum-cl; run without it (use a larger --micro-bs).")
                     if args.contrastive == "ranked":
                         local_lin = torch.cat(cache_lin)  # [accum*mb, R]; fresh-vs-cached identical ids
                         cl = ranked_contrastive_loss_ddp(
@@ -722,7 +742,7 @@ def main():
                             sel_margin=args.sel_margin, cl_mask=args.cl_mask,
                             lambda_cl=0.0, geometry=args.geometry,
                             rince_min_tau=args.rince_min_tau, rince_max_tau=args.rince_max_tau,
-                            rince_sim=args.rince_sim)
+                            rince_sim=args.rince_sim, lrcl_ranks=args.lrcl_ranks)
                         sel_val = float(sel_det)         # sel_loss already = lambda_sel * sel
                     # OpenCLIP backprops the full-set CE for EACH micro with NO /accum (l.162): the
                     # active slice differs per micro, so summing over micros gives each slice its
@@ -757,7 +777,7 @@ def main():
                         cl_mask=args.cl_mask,
                         lambda_cl=args.lambda_cl, geometry=args.geometry,
                         rince_min_tau=args.rince_min_tau, rince_max_tau=args.rince_max_tau,
-                        rince_sim=args.rince_sim,
+                        rince_sim=args.rince_sim, lrcl_ranks=args.lrcl_ranks,
                     )
                     loss = loss / args.accum
                 scaler.scale(loss).backward()
