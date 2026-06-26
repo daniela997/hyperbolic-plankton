@@ -35,6 +35,7 @@ __all__ = [
     "shared_depth_matrix",
     "stable_lineage_ids",
     "radial_ordering_loss",
+    "level_restricted_loss",
 ]
 
 
@@ -249,6 +250,62 @@ def euclidean_contrastive_loss_ddp(
         text_logits = text_logits.masked_fill(mask, float("-inf"))
     targets = torch.arange(B, device=img.device) + B * rank
     return 0.5 * (F.cross_entropy(img_logits, targets) + F.cross_entropy(text_logits, targets))
+
+
+def level_restricted_loss(img, text_embs, taxonomy_batch, ranks, curv, scale,
+                          sim="distance", tau=1.0):
+    """Level-Restricted Contrastive Learning (Tao et al. 2026, "Beyond Flat Labels"), Eq. 1-3.
+
+    One InfoNCE PER taxonomic level, contrasting only WITHIN that level (negatives = other
+    same-level labels), summed equally over levels. This removes cross-level false negatives
+    (a same-genus image is never a wrong-level negative) by construction — the partitioning
+    alternative to RINCE's grading. Uses our negative-Lorentzian-distance similarity (their
+    supplementary uses the same), so it drops into the hyperbolic setup.
+
+    Per level ℓ: build the set of UNIQUE level-ℓ labels in the batch (level-restriction). The
+    image's positive is its own level-ℓ label's text; negatives are the other unique level-ℓ
+    texts. Symmetric I→T (Eq. 1) + group-balanced T→I (Eq. 2, each label's positives = the SET
+    of images carrying it). `text_embs` = encode_taxonomy(...) cumulative per-rank embeddings.
+    """
+    levels = [r for r in ranks if r in text_embs]
+    total = img.new_zeros(())
+    n = 0
+    for r in levels:
+        v = text_embs[f"{r}_valid"]
+        labels = taxonomy_batch[r]
+        keep = [i for i in range(len(labels)) if bool(v[i]) and labels[i] is not None]
+        if len(keep) < 2:
+            continue
+        keep_t = torch.tensor(keep, device=img.device)
+        lab = [labels[i] for i in keep]
+        uniq = list(dict.fromkeys(lab))               # unique level-ℓ labels (the restricted set K^ℓ)
+        if len(uniq) < 2:
+            continue                                   # need ≥2 classes for a contrast
+        pos = {u: j for j, u in enumerate(uniq)}
+        target = torch.tensor([pos[labels[i]] for i in keep], device=img.device)  # [Nk] img -> its label idx
+        uemb = text_embs[r][keep_t][[lab.index(u) for u in uniq]]  # [U, D] one text per unique label
+        im = img[keep_t]                                # [Nk, D]
+        if sim == "euclidean":
+            s = scale * F.normalize(im, dim=-1) @ F.normalize(uemb, dim=-1).T
+        elif sim == "angle":
+            s = L.pairwise_oxy_angle(im, uemb, curv) * scale
+        else:
+            s = -L.pairwise_dist(im, uemb, curv) * scale   # [Nk, U] negative distance
+        s = s / tau
+        # I->T: each image picks its label among the U unique level texts
+        i2t = F.cross_entropy(s, target)
+        # T->I: each unique level text vs all images; positives = SET of images with that label
+        #       (group-balanced). log-softmax over images, average the positive rows' mass.
+        logp = F.log_softmax(s.T, dim=1)               # [U, Nk]
+        t2i_terms = []
+        for u in range(len(uniq)):
+            posmask = target == u
+            if posmask.any():
+                t2i_terms.append(-logp[u, posmask].mean())
+        t2i = torch.stack(t2i_terms).mean() if t2i_terms else s.new_zeros(())
+        total = total + 0.5 * (i2t + t2i)
+        n += 1
+    return total / max(n, 1)
 
 
 def radial_ordering_loss(text_embs, img, ranks, curv, margin=0.2):
