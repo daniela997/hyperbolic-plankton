@@ -541,7 +541,7 @@ def _gather_str(lst):
 def entailment_pos(
     parent: torch.Tensor, child: torch.Tensor, curv: torch.Tensor | float,
     r_min: float = 0.1, tau: float = 1.0, leak: float = 0.0, lam_u: float = 0.0,
-    cone_margin: float = 0.0,
+    cone_margin: float = 0.0, detach_parent: bool = False,
 ) -> torch.Tensor:
     """Positive entailment hinge: child should lie inside parent's cone.
 
@@ -572,8 +572,17 @@ def entailment_pos(
     condition is only satisfiable when psi(child) < psi(parent), i.e. child at larger radius
     (psi ∝ 1/||x||), so it pushes the chain outward — a principled alternative to lam_u.
 
-    Defaults (tau=1, leak=0, lam_u=0, cone_margin=0) reproduce the plain hinge exactly.
+    `detach_parent` (True): stop gradient to the PARENT in the hinge, so the only way to satisfy
+    containment is to push the CHILD outward (toward the parent's axis / larger radius), NOT to
+    shrink the parent's radius to widen its cone. Fixes origin-collapse at the root cause: the bare
+    hinge's cheapest descent direction is "shrink the parent" (psi ~ 1/radius), and since every rank
+    is parent-to-the-next, the coarse ranks get pulled to the origin (collapse cascade). Detaching
+    the parent removes that direction (verified: the per-rank collapse gradient -> 0/outward).
+
+    Defaults (tau=1, leak=0, lam_u=0, cone_margin=0, detach_parent=False) reproduce the plain hinge.
     """
+    if detach_parent:
+        parent = parent.detach()
     angle = L.oxy_angle(parent, child, curv)
     aperture = L.half_aperture(parent, curv, min_radius=r_min)
     eff = angle - tau * aperture
@@ -631,6 +640,7 @@ def _edge_loss(
     leak: float = 0.0,
     lam_u: float = 0.0,
     cone_margin: float = 0.0,
+    detach_parent: bool = False,
 ) -> torch.Tensor:
     """Entailment loss for one (parent_rank -> child_rank) edge over the B×B grid.
 
@@ -671,7 +681,8 @@ def _edge_loss(
     p_grid = parent.unsqueeze(0).expand(B, -1, -1).reshape(B * B, -1)
     c_grid = child.unsqueeze(1).expand(-1, B, -1).reshape(B * B, -1)
 
-    pos_all = entailment_pos(p_grid, c_grid, curv, r_min, tau, leak, lam_u, cone_margin).reshape(B, B)
+    pos_all = entailment_pos(p_grid, c_grid, curv, r_min, tau, leak, lam_u, cone_margin,
+                             detach_parent).reshape(B, B)
     if pos_mask.any():
         pos_loss = pos_all[pos_mask].mean()
     else:
@@ -707,6 +718,7 @@ def sel_intra(
     leak: float = 0.0,
     lam_u: float = 0.0,
     cone_margin: float = 0.0,
+    detach_parent: bool = False,
 ) -> torch.Tensor:
     """Stacked entailment between consecutive ranks (paper Eq. 3).
 
@@ -744,6 +756,7 @@ def sel_intra(
             leak=leak,
             lam_u=lam_u,
             cone_margin=cone_margin,
+            detach_parent=detach_parent,
         )
         total = loss if total is None else total + loss
     return total / len(edges)
@@ -828,6 +841,7 @@ def stacked_entailment_loss(
     leak: float = 0.0,
     lam_u: float = 0.0,
     cone_margin: float = 0.0,
+    detach_parent: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Full SEL = SEL-intra + SEL-inter. Returns (total, intra, inter).
 
@@ -845,6 +859,7 @@ def stacked_entailment_loss(
     # cone_margin (containment) applies to text-text rank nesting (sel_intra) ONLY — sel_inter's
     # child is an image POINT with no meaningful cone, so it keeps the plain in-cone hinge.
     intra = sel_intra(sel_embs, taxonomy_batch, ranks, curv, r_min, margin, use_negatives,
-                      stats=stats, tau=tau, leak=leak, lam_u=lam_u, cone_margin=cone_margin)
+                      stats=stats, tau=tau, leak=leak, lam_u=lam_u, cone_margin=cone_margin,
+                      detach_parent=detach_parent)
     inter = sel_inter(img, sel_embs, taxonomy_batch, ranks, curv, r_min, margin, use_negatives, stats=stats)
     return intra + inter, intra, inter
