@@ -42,6 +42,7 @@ from hyperbolic_plankton.loss import (
     accum_contrastive_loss_ddp,
     euclidean_contrastive_loss_ddp,
     hyperbolic_angle_contrastive_loss_ddp,
+    hybrid_graded_loss,
     hyperbolic_contrastive_loss_ddp,
     level_restricted_accum,
     level_restricted_loss,
@@ -246,7 +247,7 @@ def encode_cl_features(model, pixel_values, taxonomy_batch, ranks, cl_mask, geom
 
 def forward_loss(model, pixel_values, taxonomy_batch, lambda_sel, stats=None,
                  sel_indep=True, contrastive="distance", ranks=RANKS,
-                 sel_tau=1.0, sel_leak=0.0, sel_uncertainty=0.0, sel_margin=0.0, sel_detach_parent=False, cl_mask="none", lambda_cl=1.0,
+                 sel_tau=1.0, sel_leak=0.0, sel_uncertainty=0.0, sel_margin=0.0, sel_neg_margin=0.0, sel_detach_parent=False, cl_mask="none", lambda_cl=1.0,
                  geometry="hyperbolic", rince_min_tau=0.1, rince_max_tau=0.5, rince_sim="distance",
                  lrcl_ranks="all"):
     """lambda_cl*contrastive(img, deepest_text) + lambda_sel*SEL. `model` may be a DDP
@@ -286,6 +287,12 @@ def forward_loss(model, pixel_values, taxonomy_batch, lambda_sel, stats=None,
         cl = level_restricted_loss(
             img, cum_embs, taxonomy_batch, lr_ranks, curv, scale,
             sim=("euclidean" if euclidean else "distance"))
+    elif contrastive == "hybrid":
+        # HYBRID: RINCE exactly-d grading + LRCL deduped-prototype symmetric I<->T (cumulative text).
+        cl = hybrid_graded_loss(
+            img, cum_embs, taxonomy_batch, ranks, curv, scale,
+            sim=("euclidean" if euclidean else rince_sim),
+            min_tau=rince_min_tau, max_tau=rince_max_tau)
     else:
         if euclidean:
             cl_fn = euclidean_contrastive_loss_ddp
@@ -311,6 +318,7 @@ def forward_loss(model, pixel_values, taxonomy_batch, lambda_sel, stats=None,
     sel, intra, inter = stacked_entailment_loss(
         img, cum_embs, taxonomy_batch, ranks, curv, stats=stats, sel_text_embs=sel_embs,
         tau=sel_tau, leak=sel_leak, lam_u=sel_uncertainty, cone_margin=sel_margin,
+        neg_cone_margin=sel_neg_margin,
         detach_parent=sel_detach_parent,
     )
     if stats is not None:
@@ -363,10 +371,11 @@ def main():
                          "baseline (open_clip ClipLoss, cosine; no SEL/lift). The Euclidean-LoRA "
                          "baseline isolates LoRA-vs-full-FT from hyperbolic-vs-Euclidean.")
     ap.add_argument("--contrastive", default="distance",
-                    choices=["distance", "angle", "ranked", "level-restricted"],
+                    choices=["distance", "angle", "ranked", "level-restricted", "hybrid"],
                     help="distance=MERU InfoNCE on -pairwise_dist; angle=ATMG exterior-angle "
                          "InfoNCE; ranked=RINCE (Hoffmann 2022) graded-by-taxonomic-depth positives; "
-                         "level-restricted=LRCL (Tao 2026) per-level unique-label InfoNCE. "
+                         "level-restricted=LRCL (Tao 2026) per-level unique-label InfoNCE; "
+                         "hybrid=RINCE exactly-d grading + LRCL deduped-prototype symmetric I<->T. "
                          "Ignored when --geometry euclidean (except level-restricted, which has a "
                          "euclidean similarity path).")
     ap.add_argument("--lrcl-ranks", default="all", choices=["all", "species"],
@@ -404,6 +413,14 @@ def main():
                          "transitive entailment (image in species => in all ancestors) and "
                          "self-induces radial spread (only satisfiable at psi(child)<psi(parent) "
                          "= child deeper). Text-text only; sel_inter unaffected. 0=off")
+    ap.add_argument("--sel-neg-margin", type=float, default=0.0,
+                    help="Cone-SEPARATION weight: the NEGATIVE counterpart to --sel-margin. SEL-intra "
+                         "negative hinge += w*psi(child), requiring a non-child rank's WHOLE cone "
+                         "OUTSIDE the wrong parent's (angle>=psi(parent)+w*psi(child)+margin). Separates "
+                         "the coarse rank cones (genus-vs-genus within a family, etc.), which propagates "
+                         "to species separation by containment. Text-text only (sel_inter's child is an "
+                         "image point with no meaningful cone). Hierarchy-aware complement to CL's flat "
+                         "species separation. 0=off")
     ap.add_argument("--sel-detach-parent", action="store_true",
                     help="stop gradient to the PARENT in the SEL-intra hinge: containment can only "
                          "be satisfied by pushing the CHILD outward, not by shrinking the parent to "
@@ -706,8 +723,9 @@ def main():
             # ranked CL needs per-micro lineage ids ([B,R]) for the full local set
             cache_lin = ([stable_lineage_ids(tb, ranks, device) for _, tb in micros]
                          if args.contrastive == "ranked" else None)
-            # LRCL needs the per-rank cumulative text embeddings (c[3]=cum_embs) for the full local set
-            cache_cum = ([c[3] for c in cached] if args.contrastive == "level-restricted" else None)
+            # LRCL/hybrid need the per-rank cumulative text embeddings (c[3]=cum_embs) for the full set
+            cache_cum = ([c[3] for c in cached]
+                         if args.contrastive in ("level-restricted", "hybrid") else None)
             for micro, (pixel_values, taxonomy_batch) in enumerate(micros):
                 last_micro = micro == args.accum - 1
                 step_stats = sel_terms if (is_log_iter and last_micro and is_main()) else None
@@ -731,6 +749,23 @@ def main():
                             local_i, local_cum, local_lab, lr_ranks, core.curvature,
                             core.logit_scale.exp(),
                             sim=("euclidean" if args.geometry == "euclidean" else "distance"))
+                    elif args.contrastive == "hybrid":
+                        # symmetric (like LRCL) -> needs full image bank. Splice fresh per-rank
+                        # cumulative texts + build full-set ALL-rank labels (finer rank needed for
+                        # the exactly-d T->I exclusion). cache_cum holds per-micro cum_embs.
+                        local_cum = {r: torch.cat([cache_cum[k][r] if k != micro else cum_fresh[r]
+                                                   for k in range(args.accum)])
+                                     for r in ranks}
+                        for r in ranks:
+                            local_cum[f"{r}_valid"] = torch.cat(
+                                [cache_cum[k][f"{r}_valid"] for k in range(args.accum)])
+                        local_tb = {r: [lab for k in range(args.accum) for lab in micros[k][1][r]]
+                                    for r in ranks}
+                        cl = hybrid_graded_loss(
+                            local_i, local_cum, local_tb, ranks, core.curvature,
+                            core.logit_scale.exp(),
+                            sim=("euclidean" if args.geometry == "euclidean" else args.rince_sim),
+                            min_tau=args.rince_min_tau, max_tau=args.rince_max_tau)
                     elif args.contrastive == "ranked":
                         local_lin = torch.cat(cache_lin)  # [accum*mb, R]; fresh-vs-cached identical ids
                         cl = ranked_contrastive_loss_ddp(
@@ -755,7 +790,8 @@ def main():
                             stats=step_stats, sel_indep=(args.sel_text == "independent"),
                             contrastive=args.contrastive, ranks=ranks, sel_tau=args.sel_tau,
                             sel_leak=args.sel_leak, sel_uncertainty=args.sel_uncertainty,
-                            sel_margin=args.sel_margin, sel_detach_parent=args.sel_detach_parent,
+                            sel_margin=args.sel_margin, sel_neg_margin=args.sel_neg_margin,
+                            sel_detach_parent=args.sel_detach_parent,
                             cl_mask=args.cl_mask,
                             lambda_cl=0.0, geometry=args.geometry,
                             rince_min_tau=args.rince_min_tau, rince_max_tau=args.rince_max_tau,
@@ -791,6 +827,7 @@ def main():
                         contrastive=args.contrastive, ranks=ranks,
                         sel_tau=args.sel_tau, sel_leak=args.sel_leak,
                         sel_uncertainty=args.sel_uncertainty, sel_margin=args.sel_margin,
+                        sel_neg_margin=args.sel_neg_margin,
                         sel_detach_parent=args.sel_detach_parent, cl_mask=args.cl_mask,
                         lambda_cl=args.lambda_cl, geometry=args.geometry,
                         rince_min_tau=args.rince_min_tau, rince_max_tau=args.rince_max_tau,

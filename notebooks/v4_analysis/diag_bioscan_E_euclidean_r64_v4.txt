@@ -1,0 +1,5 @@
+
+===== bioscan_E_euclidean_r64_v4 =====
+geometry=euclidean  sel_text=cumul  curv=1.0000  n=4878  ranks=['order', 'family', 'genus', 'species']
+  species top-1 acc = 0.8536  (95% CI [0.8438, 0.8635], 916 species)
+  inter-species proto dist = 0.9967  (MEAN separability — misleads; see NN below)

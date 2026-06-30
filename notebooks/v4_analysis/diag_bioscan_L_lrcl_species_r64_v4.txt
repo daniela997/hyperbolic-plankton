@@ -1,0 +1,19 @@
+
+===== bioscan_L_lrcl_species_r64_v4 =====
+geometry=hyperbolic  sel_text=cumul  curv=0.8118  n=4878  ranks=['order', 'family', 'genus', 'species']
+  species top-1 acc = 0.8063  (95% CI [0.7950, 0.8171], 916 species)
+  inter-species proto dist = 1.6979  (MEAN separability — misleads; see NN below)
+  CLASSIFIER protos (cumulative species): radius 1.148  NN-sep 0.652 (median 0.684)
+  per-image margin = +0.168 (median +0.210, frac>0 0.804)
+  per-rank text [cumulative (= classifier space)]  radius   aperture
+    order     1.144    0.164
+    family    1.188    0.158
+    genus     1.147    0.167
+    species   1.073    0.183
+  edge            entail_ok  slack(ψp-ψc-angle)  fits%
+    order->family    0.000      -2.023             0.00
+    family->genus     0.000      -2.006             0.00
+    genus->species   0.000      -2.013             0.00
+  image in cone of:  order=0.00 family=0.00 genus=0.00 species=0.00 
+  image radius = 1.210 ± 0.093   image-dir mean pairwise cos = 0.058 (1=collapsed, 0=spread)
+  image<->own-species-text dist: cumul 0.646  |  cumulative(CL target) 0.646

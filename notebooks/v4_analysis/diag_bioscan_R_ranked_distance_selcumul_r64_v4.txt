@@ -1,0 +1,19 @@
+
+===== bioscan_R_ranked_distance_selcumul_r64_v4 =====
+geometry=hyperbolic  sel_text=cumul  curv=0.7786  n=4878  ranks=['order', 'family', 'genus', 'species']
+  species top-1 acc = 0.7261  (95% CI [0.7138, 0.7388], 916 species)
+  inter-species proto dist = 0.4305  (MEAN separability — misleads; see NN below)
+  CLASSIFIER protos (cumulative species): radius 0.308  NN-sep 0.098 (median 0.091)
+  per-image margin = +0.009 (median +0.010, frac>0 0.723)
+  per-rank text [cumulative (= classifier space)]  radius   aperture
+    order     0.114    1.571
+    family    0.161    1.571
+    genus     0.201    1.571
+    species   0.306    0.827
+  edge            entail_ok  slack(ψp-ψc-angle)  fits%
+    order->family    1.000      -1.333             0.00
+    family->genus     1.000      -1.303             0.00
+    genus->species   0.999      -0.698             0.00
+  image in cone of:  order=0.97 family=0.99 genus=0.99 species=0.74 
+  image radius = 0.833 ± 0.042   image-dir mean pairwise cos = 0.035 (1=collapsed, 0=spread)
+  image<->own-species-text dist: cumul 0.585  |  cumulative(CL target) 0.585

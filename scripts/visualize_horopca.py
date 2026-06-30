@@ -62,7 +62,9 @@ def main():
     ap.add_argument("--lora-r", type=int, default=128)
     ap.add_argument("--n", type=int, default=400, help="#samples (images) to plot")
     ap.add_argument("--out", default="/scratch/daniela/horopca.png")
-    ap.add_argument("--sel-text", default="independent", choices=["independent", "cumulative"])
+    ap.add_argument("--sel-text", default=None, choices=["independent", "cumulative"],
+                    help="text form for the per-rank SEL embeddings. Default: auto-read from the "
+                         "checkpoint's sel_text arg (matches training). Pass to override.")
     ap.add_argument("--split", default="test_seen", choices=["test_seen", "test_unseen"],
                     help="bioscan split to visualise (seen = trained classes, unseen = novel lineages)")
     ap.add_argument("--indep-prefix", action="store_true",
@@ -80,7 +82,20 @@ def main():
     model.load_state_dict(sd.get("model", sd), strict=False)
     model.to(device).eval()
     curv = model.curvature.item()
-    print(f"loaded {args.ckpt}  curv={curv:.4f}")
+    ck_args = sd.get("args", {})
+    ck_args = ck_args if isinstance(ck_args, dict) else vars(ck_args)
+    # HoroPCA is a HYPERBOLIC visualisation (Poincaré disk, hyperboloid Fréchet mean). A Euclidean run
+    # trained flat features, never lifted them, and its `curvature` param sits at the unused init (1.0).
+    # Projecting flat features through lorentz_to_poincare with a fabricated curv is meaningless -> skip.
+    if ck_args.get("geometry", "hyperbolic") == "euclidean":
+        raise SystemExit(f"{args.ckpt} is a EUCLIDEAN run — HoroPCA (hyperbolic) does not apply; skipped.")
+    # sel_text: default to the checkpoint's trained value (matches training), CLI overrides.
+    # But independent text is only TRAINED when SEL is on (lambda_sel>0); for CL-only configs (LRCL,
+    # RINCE-clonly, C4) it's untrained junk, so fall back to cumulative (what they actually trained).
+    if args.sel_text is None:
+        sel_on = float(ck_args.get("lambda_sel", 1.0)) > 0.0
+        args.sel_text = ck_args.get("sel_text", "independent") if sel_on else "cumulative"
+    print(f"loaded {args.ckpt}  curv={curv:.4f}  sel_text={args.sel_text}")
 
     # sample seen-val rows (planktonzilla) or test_seen rows (bioscan)
     if args.dataset == "bioscan":
@@ -120,6 +135,20 @@ def main():
             if valid.any():
                 pts.append(lorentz_to_poincare(txt[r][valid], curv))
                 labels += [r] * int(valid.sum())
+        # cumulative species = the CLASSIFIER prototypes (what actually classifies). For indep runs
+        # this is a DIFFERENT embedding from the per-rank SEL species above — plot it so the figure
+        # shows both the SEL subspace and what classifies. For cumulative/CL-only runs we DON'T add
+        # it: the per-rank "species" already IS the cumulative classifier embedding. NB this relies on
+        # BIOSCAN's complete-species structure (each species -> a unique `full` string -> identical
+        # encoding, so per-sample species == per-class prototype; verified ~1e-3). On a ragged dataset
+        # (Planktonzilla: variable annotation depth -> differing `full` strings) they would DIFFER and
+        # both series should be drawn.
+        if args.sel_text == "independent":
+            cum = model.encode_taxonomy(tax, indep=False)
+            cv = cum["species_valid"]
+            if cv.any():
+                pts.append(lorentz_to_poincare(cum["species"][cv], curv))
+                labels += ["species (classifier)"] * int(cv.sum())
         P = torch.cat(pts, dim=0).float()
     print(f"points: {P.shape[0]}  dim={P.shape[1]}")
 
@@ -147,10 +176,11 @@ def main():
 def _plot(emb2d, labels, out, curv, ranks):
     import matplotlib.pyplot as plt
 
-    order = ["image"] + ranks
+    order = ["image"] + ranks + ["species (classifier)"]
     colors = {  # rank -> color (coarse->fine = dark->bright), images grey
         "image": "0.6", "kingdom": "#440154", "phylum": "#414487", "class": "#2a788e",
         "order": "#22a884", "family": "#7ad151", "genus": "#fde725", "species": "#d62728",
+        "species (classifier)": "k",  # cumulative species = what classifies (distinct from SEL species)
     }
     labels = np.array(labels)
     fig, ax = plt.subplots(figsize=(6, 6))

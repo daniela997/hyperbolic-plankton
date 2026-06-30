@@ -37,6 +37,7 @@ __all__ = [
     "radial_ordering_loss",
     "level_restricted_loss",
     "level_restricted_accum",
+    "hybrid_graded_loss",
 ]
 
 
@@ -294,7 +295,7 @@ def level_restricted_loss(img, text_embs, taxonomy_batch, ranks, curv, scale,
         if sim == "euclidean":
             s = scale * F.normalize(im, dim=-1) @ F.normalize(uemb, dim=-1).T
         elif sim == "angle":
-            s = L.pairwise_oxy_angle(im, uemb, curv) * scale
+            s = -L.pairwise_oxy_angle(uemb, im, curv).T * scale  # text/species apex, negated (see hybrid)
         else:
             s = -L.pairwise_dist(im, uemb, curv) * scale   # [Nk, U] negative distance
         s = s / tau
@@ -309,6 +310,76 @@ def level_restricted_loss(img, text_embs, taxonomy_batch, ranks, curv, scale,
             if posmask.any():
                 t2i_terms.append(-logp[u, posmask].mean())
         t2i = torch.stack(t2i_terms).mean() if t2i_terms else s.new_zeros(())
+        total = total + 0.5 * (i2t + t2i)
+        n += 1
+    return total / max(n, 1)
+
+
+def hybrid_graded_loss(img, text_embs, taxonomy_batch, ranks, curv, scale,
+                       sim="distance", min_tau=0.1, max_tau=0.5):
+    """Hybrid: RINCE's exactly-d tier partitioning + LRCL's deduped-prototype symmetric I<->T.
+
+    Per rank ℓ (= depth d): prototypes = UNIQUE cumulative rank-ℓ labels (the deduped depth-d
+    prefixes; `text_embs[ℓ]` cumulative). Symmetric I->T + group-balanced T->I (LRCL form), BUT with
+    RINCE's exactly-d exclusion in T->I: a prototype's positive images are those matching it at rank ℓ
+    AND differing at the next finer rank (depth exactly d) — images that also share a deeper prototype
+    are excluded here (counted at their own deeper tier), so coarse prototypes model the residual
+    cross-finer-rank relatedness, not the species-mate mass. Per-tier temperature (coarser=hotter,
+    RINCE schedule). Pass CUMULATIVE text_embs.
+    """
+    levels = [r for r in ranks if r in text_embs]
+    total = img.new_zeros(())
+    n = 0
+    for di, r in enumerate(levels):
+        d = di + 1
+        finer = levels[di + 1] if di + 1 < len(levels) else None
+        v = text_embs[f"{r}_valid"]
+        labels = taxonomy_batch[r]
+        keep = [i for i in range(len(labels)) if bool(v[i]) and labels[i] is not None]
+        if len(keep) < 2:
+            continue
+        keep_t = torch.tensor(keep, device=img.device)
+        lab = [labels[i] for i in keep]
+        uniq = list(dict.fromkeys(lab))
+        if len(uniq) < 2:
+            continue
+        pos = {u: j for j, u in enumerate(uniq)}
+        target = torch.tensor([pos[labels[i]] for i in keep], device=img.device)  # [Nk] -> rank-ℓ proto
+        uemb = text_embs[r][keep_t][[lab.index(u) for u in uniq]]  # [U,D] cumulative text per unique label
+        im = img[keep_t]
+        if sim == "euclidean":
+            s = scale * F.normalize(im, dim=-1) @ F.normalize(uemb, dim=-1).T
+        elif sim == "angle":
+            # entailment convention: angle at the TEXT/species apex (uemb is the parent), oxy_angle ~0
+            # when the image is aligned on the species' outward ray. NEGATE so larger score = more
+            # similar (matches -pairwise_dist below; softmax/CE want larger=positive). pairwise_oxy_angle
+            # (uemb, im) -> [U, Nk]; .T -> [Nk, U]. (Image-apex order, the un-negated form, is the WRONG
+            # vertex — it gives pi for an aligned image; that bug broke the early RINCE-angle runs.)
+            s = -L.pairwise_oxy_angle(uemb, im, curv).T * scale
+        else:
+            s = -L.pairwise_dist(im, uemb, curv) * scale
+        tau = min_tau + (1.0 - d / len(levels)) * (max_tau - min_tau)  # coarser -> hotter
+        s = s / tau
+        i2t = F.cross_entropy(s, target)                       # LRCL I->T
+        logp = F.log_softmax(s.T, dim=1)                       # [U,Nk]
+        U = len(uniq)
+        # group membership mask [U, Nk]: image j belongs to prototype u iff target[j]==u
+        grp = (target[None, :] == torch.arange(U, device=img.device)[:, None])  # [U,Nk] bool
+        if finer is not None:
+            # exactly-d exclusion (VECTORISED): drop images in u's group whose NEXT-FINER rank label
+            # matches the group representative's (rep = first image in the group). Build dense finer
+            # ids once, take each prototype's rep-finer id, mask out same-finer images.
+            finer_lab = [taxonomy_batch[finer][i] for i in keep]
+            finer_id = _dense_ids(finer_lab, img.device)        # [Nk]
+            first_idx = grp.float().argmax(dim=1)               # [U] first image index in each group
+            rep_finer = finer_id[first_idx]                     # [U] rep's finer id per prototype
+            exclude = grp & (finer_id[None, :] == rep_finer[:, None])  # same-finer-as-rep -> drop
+            grp_excl = grp & ~exclude
+            grp = torch.where(grp_excl.any(dim=1, keepdim=True), grp_excl, grp)  # fall back if all dropped
+        # group-balanced T->I: per prototype, mean log-prob over its (masked) positive images
+        cnt = grp.float().sum(dim=1).clamp(min=1)               # [U]
+        per_u = -(logp * grp.float()).sum(dim=1) / cnt          # [U]
+        t2i = per_u[grp.any(dim=1)].mean() if grp.any() else s.new_zeros(())
         total = total + 0.5 * (i2t + t2i)
         n += 1
     return total / max(n, 1)
@@ -514,7 +585,7 @@ def level_restricted_accum(local_img, local_text_per_rank, local_labels_per_rank
         if sim == "euclidean":
             s = scale * F.normalize(im, dim=-1) @ F.normalize(uemb, dim=-1).T
         elif sim == "angle":
-            s = L.pairwise_oxy_angle(im, uemb, curv) * scale
+            s = -L.pairwise_oxy_angle(uemb, im, curv).T * scale  # text/species apex, negated (see hybrid)
         else:
             s = -L.pairwise_dist(im, uemb, curv) * scale            # [Nk, U]
         s = s / tau
@@ -602,14 +673,27 @@ def entailment_neg(
     curv: torch.Tensor | float,
     r_min: float = 0.1,
     margin: float = 0.1,
+    cone_margin: float = 0.0,
 ) -> torch.Tensor:
     """Negative entailment hinge: a non-child should lie outside parent's cone.
 
-    L = relu(half_aperture(parent) - oxy_angle(parent, child) + margin).
+    Base: L = relu(half_aperture(parent) - oxy_angle(parent, child) + margin) — pushes the child's
+    APEX outside the wrong parent's cone (apex-only, mirrors the plain positive hinge).
+
+    `cone_margin` (>0): the SEPARATION counterpart to entailment_pos's cone_margin. Adds
+    cone_margin*psi(child), requiring the child's WHOLE CONE outside the parent's
+    (oxy_angle >= psi(parent) + cone_margin*psi(child) + margin), not just its apex. This is the
+    symmetric negative to whole-cone containment: as the positive pulls correct children's whole
+    cones IN, this pushes wrong-parent children's whole cones OUT — the separation force that the
+    plain (apex-only) negative lacks (measured: ~85% of negatives already apex-satisfied, so the
+    apex hinge gives no gradient; the whole-cone version keeps pushing non-children further apart).
     """
     angle = L.oxy_angle(parent, child, curv)
     aperture = L.half_aperture(parent, curv, min_radius=r_min)
-    return F.relu(aperture - angle + margin)
+    eff = aperture - angle + margin
+    if cone_margin > 0.0:
+        eff = eff + cone_margin * L.half_aperture(child, curv, min_radius=r_min)
+    return F.relu(eff)
 
 
 def _dense_ids(labels: list[str | None], device: torch.device) -> torch.Tensor:
@@ -640,6 +724,7 @@ def _edge_loss(
     leak: float = 0.0,
     lam_u: float = 0.0,
     cone_margin: float = 0.0,
+    neg_cone_margin: float = 0.0,
     detach_parent: bool = False,
 ) -> torch.Tensor:
     """Entailment loss for one (parent_rank -> child_rank) edge over the B×B grid.
@@ -691,7 +776,8 @@ def _edge_loss(
 
     neg_loss = None
     if use_negatives and neg_mask.any():
-        neg_all = entailment_neg(p_grid, c_grid, curv, r_min, margin).reshape(B, B)
+        neg_all = entailment_neg(p_grid, c_grid, curv, r_min, margin,
+                                 cone_margin=neg_cone_margin).reshape(B, B)
         neg_loss = neg_all[neg_mask].mean()
         loss = 0.5 * (loss + neg_loss)
 
@@ -718,6 +804,7 @@ def sel_intra(
     leak: float = 0.0,
     lam_u: float = 0.0,
     cone_margin: float = 0.0,
+    neg_cone_margin: float = 0.0,
     detach_parent: bool = False,
 ) -> torch.Tensor:
     """Stacked entailment between consecutive ranks (paper Eq. 3).
@@ -756,6 +843,7 @@ def sel_intra(
             leak=leak,
             lam_u=lam_u,
             cone_margin=cone_margin,
+            neg_cone_margin=neg_cone_margin,
             detach_parent=detach_parent,
         )
         total = loss if total is None else total + loss
@@ -841,6 +929,7 @@ def stacked_entailment_loss(
     leak: float = 0.0,
     lam_u: float = 0.0,
     cone_margin: float = 0.0,
+    neg_cone_margin: float = 0.0,
     detach_parent: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Full SEL = SEL-intra + SEL-inter. Returns (total, intra, inter).
@@ -856,10 +945,16 @@ def stacked_entailment_loss(
     `stats` (if given) collects per-edge / per-term pos+neg components for logging.
     """
     sel_embs = sel_text_embs if sel_text_embs is not None else text_embs
-    # cone_margin (containment) applies to text-text rank nesting (sel_intra) ONLY — sel_inter's
-    # child is an image POINT with no meaningful cone, so it keeps the plain in-cone hinge.
+    # Both margins apply to SEL-INTRA (text-text rank cones) ONLY — sel_inter's child is an image
+    # POINT (its cone psi(image) is geometrically defined but SEMANTICALLY vacuous: an instance has no
+    # descendants to contain), so inter keeps the plain hinges. cone_margin (POSITIVE/containment):
+    # child rank's whole cone INSIDE its parent. neg_cone_margin (NEGATIVE/separation): child rank's
+    # whole cone OUTSIDE wrong parents — separates the COARSE rank cones (genus-vs-genus within a
+    # family, etc.), which propagates to species separation by containment (species ⊂ separated genus
+    # cones). This is the hierarchy-aware complement to CL's direct flat species separation.
     intra = sel_intra(sel_embs, taxonomy_batch, ranks, curv, r_min, margin, use_negatives,
                       stats=stats, tau=tau, leak=leak, lam_u=lam_u, cone_margin=cone_margin,
-                      detach_parent=detach_parent)
-    inter = sel_inter(img, sel_embs, taxonomy_batch, ranks, curv, r_min, margin, use_negatives, stats=stats)
+                      neg_cone_margin=neg_cone_margin, detach_parent=detach_parent)
+    inter = sel_inter(img, sel_embs, taxonomy_batch, ranks, curv, r_min, margin, use_negatives,
+                      stats=stats)
     return intra + inter, intra, inter

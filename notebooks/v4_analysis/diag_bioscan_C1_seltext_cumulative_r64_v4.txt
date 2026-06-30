@@ -1,0 +1,19 @@
+
+===== bioscan_C1_seltext_cumulative_r64_v4 =====
+geometry=hyperbolic  sel_text=cumul  curv=1.2723  n=4878  ranks=['order', 'family', 'genus', 'species']
+  species top-1 acc = 0.6007  (95% CI [0.5873, 0.6142], 916 species)
+  inter-species proto dist = 1.5655  (MEAN separability — misleads; see NN below)
+  CLASSIFIER protos (cumulative species): radius 1.077  NN-sep 0.201 (median 0.194)
+  per-image margin = -0.008 (median +0.021, frac>0 0.599)
+  per-rank text [cumulative (= classifier space)]  radius   aperture
+    order     0.097    1.571
+    family    0.159    1.563
+    genus     0.222    0.956
+    species   1.005    0.149
+  edge            entail_ok  slack(ψp-ψc-angle)  fits%
+    order->family    1.000      -1.235             0.00
+    family->genus     0.999      -0.702             0.00
+    genus->species   0.981      -0.031             0.24
+  image in cone of:  order=0.64 family=0.99 genus=0.94 species=0.17 
+  image radius = 1.880 ± 0.028   image-dir mean pairwise cos = 0.010 (1=collapsed, 0=spread)
+  image<->own-species-text dist: cumul 0.963  |  cumulative(CL target) 0.963

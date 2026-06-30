@@ -1,0 +1,19 @@
+
+===== bioscan_B0_baseline_r64_v4 =====
+geometry=hyperbolic  sel_text=indep  curv=0.8512  n=4878  ranks=['order', 'family', 'genus', 'species']
+  species top-1 acc = 0.7374  (95% CI [0.7245, 0.7493], 916 species)
+  inter-species proto dist = 1.5502  (MEAN separability — misleads; see NN below)
+  CLASSIFIER protos (cumulative species): radius 1.062  NN-sep 0.494 (median 0.516)
+  per-image margin = +0.095 (median +0.127, frac>0 0.735)
+  per-rank text [independent (SEL); classifier uses CUMULATIVE species above]  radius   aperture
+    order     0.142    1.571
+    family    0.165    1.571
+    genus     0.184    1.571
+    species   0.201    1.571
+  edge            entail_ok  slack(ψp-ψc-angle)  fits%
+    order->family    0.946      -1.417             0.00
+    family->genus     0.959      -1.444             0.00
+    genus->species   1.000      -1.288             0.00
+  image in cone of:  order=0.01 family=0.09 genus=0.57 species=0.94 
+  image radius = 1.116 ± 0.106   image-dir mean pairwise cos = 0.016 (1=collapsed, 0=spread)
+  image<->own-species-text dist: indep-SEL 1.079  |  cumulative(CL target) 0.585

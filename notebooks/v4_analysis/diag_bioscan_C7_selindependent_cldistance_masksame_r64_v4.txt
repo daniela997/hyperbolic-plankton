@@ -1,0 +1,19 @@
+
+===== bioscan_C7_selindependent_cldistance_masksame_r64_v4 =====
+geometry=hyperbolic  sel_text=indep  curv=0.8573  n=4878  ranks=['order', 'family', 'genus', 'species']
+  species top-1 acc = 0.7679  (95% CI [0.7560, 0.7792], 916 species)
+  inter-species proto dist = 1.5899  (MEAN separability — misleads; see NN below)
+  CLASSIFIER protos (cumulative species): radius 1.094  NN-sep 0.507 (median 0.527)
+  per-image margin = +0.118 (median +0.171, frac>0 0.765)
+  per-rank text [independent (SEL); classifier uses CUMULATIVE species above]  radius   aperture
+    order     0.144    1.571
+    family    0.167    1.571
+    genus     0.186    1.571
+    species   0.202    1.571
+  edge            entail_ok  slack(ψp-ψc-angle)  fits%
+    order->family    0.969      -1.428             0.00
+    family->genus     0.966      -1.451             0.00
+    genus->species   1.000      -1.310             0.00
+  image in cone of:  order=0.02 family=0.09 genus=0.44 species=0.94 
+  image radius = 1.152 ± 0.108   image-dir mean pairwise cos = 0.012 (1=collapsed, 0=spread)
+  image<->own-species-text dist: indep-SEL 1.117  |  cumulative(CL target) 0.561

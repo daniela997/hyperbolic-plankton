@@ -1,0 +1,19 @@
+
+===== bioscan_C10_selcumulative_clangle_masksame_r64_v4 =====
+geometry=hyperbolic  sel_text=cumul  curv=1.1002  n=4878  ranks=['order', 'family', 'genus', 'species']
+  species top-1 acc = 0.7522  (95% CI [0.7392, 0.7645], 916 species)
+  inter-species proto dist = 0.0019  (MEAN separability — misleads; see NN below)
+  CLASSIFIER protos (cumulative species): radius 0.002  NN-sep 0.001 (median 0.001)
+  per-image margin = +0.000 (median +0.000, frac>0 0.712)
+  per-rank text [cumulative (= classifier space)]  radius   aperture
+    order     0.001    1.571
+    family    0.001    1.571
+    genus     0.001    1.571
+    species   0.002    1.571
+  edge            entail_ok  slack(ψp-ψc-angle)  fits%
+    order->family    0.985      -1.182             0.00
+    family->genus     1.000      -1.203             0.00
+    genus->species   0.971      -1.360             0.00
+  image in cone of:  order=1.00 family=1.00 genus=1.00 species=1.00 
+  image radius = 0.005 ± 0.000   image-dir mean pairwise cos = 0.405 (1=collapsed, 0=spread)
+  image<->own-species-text dist: cumul 0.004  |  cumulative(CL target) 0.004

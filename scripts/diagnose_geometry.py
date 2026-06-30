@@ -50,7 +50,11 @@ def _build_from_ckpt(path, device):
         )
     model.load_state_dict(sd.get("model", sd), strict=False)
     model.to(device).eval()
-    indep = a.get("sel_text", "independent") == "independent"
+    # independent per-rank text is only TRAINED when SEL is on with sel_text=independent. For CL-only
+    # configs (lambda_sel=0: LRCL, RINCE-clonly, C4) the independent text is untrained junk — use the
+    # cumulative text those configs actually trained, so the per-rank rows reflect a real embedding.
+    sel_on = float(a.get("lambda_sel", 1.0)) > 0.0
+    indep = sel_on and a.get("sel_text", "independent") == "independent"
     return model, geom, indep, a
 
 
@@ -99,18 +103,68 @@ def diagnose(path, dataset, n, device):
     rng = np.random.default_rng(0)
     boot = [correct[rng.integers(0, n, n)].mean() for _ in range(2000)]
     lo, hi = np.percentile(boot, [2.5, 97.5])
-    print(f"  species top-1 acc = {acc:.4f}  (95% CI [{lo:.4f}, {hi:.4f}], {len(uniq)} species)")
+    print(f"  species top-1 acc (DISTANCE) = {acc:.4f}  (95% CI [{lo:.4f}, {hi:.4f}], {len(uniq)} species)")
+
+    # ---- ATMG angle-based classification (paper §6.1: predict = argmin exterior angle α) ----
+    # α = oxy_angle(class_TEXT, image) — text is the apex (NOT symmetric: oxy_angle(img,text) is the
+    # OTHER vertex). pairwise_oxy_angle(P, img) -> [C, B]; per image (column) pick the class (row) with
+    # MINIMUM angle. (ATMG's released code does abs()+argmax, which CONTRADICTS its paper's "minimum
+    # average α"; verified on the toy that min-angle = correct match, so we follow the PAPER.)
+    if geom != "euclidean":
+        ang = L.pairwise_oxy_angle(P, img, curv)        # [C, B] angle at each class-text apex
+        pred_a = ang.argmin(0)                          # per image, class with smallest angle
+        correct_a = (pred_a == true).float().cpu().numpy()
+        acc_a = correct_a.mean()
+        boot_a = [correct_a[rng.integers(0, n, n)].mean() for _ in range(2000)]
+        lo_a, hi_a = np.percentile(boot_a, [2.5, 97.5])
+        print(f"  species top-1 acc (ANGLE/ATMG) = {acc_a:.4f}  (95% CI [{lo_a:.4f}, {hi_a:.4f}])")
+
+        # ---- CONE-ENERGY classification (Dhall 2020, learning_embeddings E_operator) ----
+        # predict = the species whose cone the image LEAST violates (min order-violation energy).
+        # E(class_text, image) = relu(oxy_angle(class_text, image) - half_aperture(class_text)) — our
+        # Lorentz form of their `clamp(theta_between_x_y - psi_x, min=0)` (order_embeddings_h.py:1097).
+        # This makes the CONE the classifier (their method), vs distance-to-prototype (ours). Tests
+        # whether SEL's cones are useful-but-unused, or genuinely useless, for classification.
+        cone_E = torch.clamp(L.pairwise_oxy_angle(P, img, curv)
+                             - L.half_aperture(P, curv).unsqueeze(1), min=0.0)  # [C, B]
+        pred_e = cone_E.argmin(0)                        # per image, class with least cone violation
+        correct_e = (pred_e == true).float().cpu().numpy()
+        acc_e = correct_e.mean()
+        boot_e = [correct_e[rng.integers(0, n, n)].mean() for _ in range(2000)]
+        lo_e, hi_e = np.percentile(boot_e, [2.5, 97.5])
+        frac_contained = (cone_E.gather(0, true.unsqueeze(0)).squeeze(0) == 0).float().mean().item()
+        print(f"  species top-1 acc (CONE-ENERGY/Dhall) = {acc_e:.4f}  (95% CI [{lo_e:.4f}, {hi_e:.4f}]; "
+              f"img inside own-species cone {frac_contained:.2f})")
     offdiag = (L.pairwise_dist(P, P, curv) if geom != "euclidean"
                else 1 - torch.nn.functional.normalize(P, dim=-1) @ torch.nn.functional.normalize(P, dim=-1).T)
     od = offdiag[~torch.eye(len(uniq), dtype=bool, device=device)]
-    print(f"  inter-species proto dist = {od.mean():.4f}  (separability)")
+    print(f"  inter-species proto dist = {od.mean():.4f}  (MEAN separability — misleads; see NN below)")
+
+    # ---- classifier subspace (cumulative-species protos = what actually classifies) ----
+    # NN-separability + per-image margin are what predict F1 (mean separability does not):
+    # classification is argmin distance, decided by the NEAREST confusable proto, not the average.
+    PP = offdiag.clone()
+    PP[torch.eye(len(uniq), dtype=bool, device=device)] = float("inf")
+    nn = PP.min(1).values  # each proto's distance to its nearest neighbour
+    proto_r = L.distance_from_origin(P, curv) if geom != "euclidean" else None
+    d_correct = d.gather(1, true[:, None]).squeeze(1)
+    dd = d.clone(); dd.scatter_(1, true[:, None], float("inf"))
+    margin = dd.min(1).values - d_correct  # >0 => correctly classified; magnitude = confidence
+    print(f"  CLASSIFIER protos (cumulative species): "
+          f"radius {proto_r.mean():.3f}  NN-sep {nn.mean():.3f} (median {nn.median():.3f})")
+    print(f"  per-image margin = {margin.mean():+.3f} (median {margin.median():+.3f}, "
+          f"frac>0 {(margin > 0).float().mean():.3f})")
 
     if geom == "euclidean":
         print("  (euclidean: cone/entailment geometry n/a)")
         return
 
-    # ---- per-rank text geometry ----
-    print("  per-rank text  radius   aperture")
+    # ---- per-rank text geometry (the SEL subspace) ----
+    # txt = encode_taxonomy(indep=indep) = the text form SEL was TRAINED on. For indep runs this is
+    # the independent per-rank text — a DIFFERENT embedding from the cumulative-species protos that
+    # classify (reported above). So these rows describe SEL's geometry, NOT the classifier's.
+    sub = "independent (SEL); classifier uses CUMULATIVE species above" if indep else "cumulative (= classifier space)"
+    print(f"  per-rank text [{sub}]  radius   aperture")
     for r in ranks:
         if r not in txt:
             continue
@@ -151,11 +205,17 @@ def diagnose(path, dataset, n, device):
     offc = cos[~torch.eye(n, dtype=bool, device=device)]
     print(f"  image radius = {ir.mean():.3f} ± {ir.std():.3f}   "
           f"image-dir mean pairwise cos = {offc.mean():.3f} (1=collapsed, 0=spread)")
-    # image <-> its own species text distance
+    # image <-> its own species text distance. For indep runs txt["species"] is the SEL (independent)
+    # species — NOT what the image is CL-aligned to. Report both: image<->SEL-species and the
+    # image<->cumulative-species (cum["species"], the CL/classifier target).
     spv = txt["species_valid"]
     dii = torch.stack([L.pairwise_dist(img[i:i + 1], txt["species"][i:i + 1], curv)[0, 0]
                        for i in range(n) if spv[i]]).mean()
-    print(f"  image<->own-species-text dist = {dii:.3f}")
+    cspv = cum["species_valid"]
+    dic = torch.stack([L.pairwise_dist(img[i:i + 1], cum["species"][i:i + 1], curv)[0, 0]
+                       for i in range(n) if cspv[i]]).mean()
+    sel_lbl = "indep-SEL" if indep else "cumul"
+    print(f"  image<->own-species-text dist: {sel_lbl} {dii:.3f}  |  cumulative(CL target) {dic:.3f}")
 
 
 def main():
