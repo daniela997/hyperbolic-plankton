@@ -1,7 +1,9 @@
 
 ===== bioscan_C7_selindependent_cldistance_masksame_r64_v4 =====
 geometry=hyperbolic  sel_text=indep  curv=0.8573  n=4878  ranks=['order', 'family', 'genus', 'species']
-  species top-1 acc = 0.7679  (95% CI [0.7560, 0.7792], 916 species)
+  species top-1 acc (DISTANCE) = 0.7679  (95% CI [0.7560, 0.7792], 916 species)
+  species top-1 acc (ANGLE/ATMG) = 0.5968  (95% CI [0.5826, 0.6099])
+  species top-1 acc (CONE-ENERGY/Dhall) = 0.4028  (95% CI [0.3889, 0.4172]; img inside own-species cone 0.00)
   inter-species proto dist = 1.5899  (MEAN separability — misleads; see NN below)
   CLASSIFIER protos (cumulative species): radius 1.094  NN-sep 0.507 (median 0.527)
   per-image margin = +0.118 (median +0.171, frac>0 0.765)

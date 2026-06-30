@@ -1,19 +1,21 @@
 
 ===== bioscan_L_lrcl_all_selindep_r64_v4 =====
-geometry=hyperbolic  sel_text=indep  curv=0.8934  n=4878  ranks=['order', 'family', 'genus', 'species']
-  species top-1 acc = 0.7023  (95% CI [0.6896, 0.7153], 916 species)
-  inter-species proto dist = 1.6212  (MEAN separability — misleads; see NN below)
-  CLASSIFIER protos (cumulative species): radius 1.106  NN-sep 0.428 (median 0.448)
-  per-image margin = +0.079 (median +0.084, frac>0 0.700)
+geometry=hyperbolic  sel_text=indep  curv=0.8823  n=4878  ranks=['order', 'family', 'genus', 'species']
+  species top-1 acc (DISTANCE) = 0.7597  (95% CI [0.7476, 0.7708], 916 species)
+  species top-1 acc (ANGLE/ATMG) = 0.4721  (95% CI [0.4580, 0.4861])
+  species top-1 acc (CONE-ENERGY/Dhall) = 0.4157  (95% CI [0.4022, 0.4295]; img inside own-species cone 0.00)
+  inter-species proto dist = 1.7106  (MEAN separability — misleads; see NN below)
+  CLASSIFIER protos (cumulative species): radius 1.164  NN-sep 0.492 (median 0.532)
+  per-image margin = +0.115 (median +0.130, frac>0 0.758)
   per-rank text [independent (SEL); classifier uses CUMULATIVE species above]  radius   aperture
-    order     0.256    1.305
-    family    0.180    1.571
-    genus     0.193    1.571
-    species   0.202    1.569
+    order     0.255    1.312
+    family    0.184    1.571
+    genus     0.199    1.550
+    species   0.211    1.504
   edge            entail_ok  slack(ψp-ψc-angle)  fits%
-    order->family    0.622      -2.115             0.00
-    family->genus     0.939      -1.453             0.00
-    genus->species   1.000      -1.246             0.00
-  image in cone of:  order=0.76 family=0.82 genus=0.83 species=0.91 
-  image radius = 1.056 ± 0.058   image-dir mean pairwise cos = 0.075 (1=collapsed, 0=spread)
-  image<->own-species-text dist: indep-SEL 1.020  |  cumulative(CL target) 0.521
+    order->family    0.775      -2.030             0.00
+    family->genus     0.946      -1.463             0.00
+    genus->species   1.000      -1.291             0.00
+  image in cone of:  order=0.78 family=0.92 genus=0.94 species=0.93 
+  image radius = 1.123 ± 0.052   image-dir mean pairwise cos = 0.088 (1=collapsed, 0=spread)
+  image<->own-species-text dist: indep-SEL 1.075  |  cumulative(CL target) 0.488

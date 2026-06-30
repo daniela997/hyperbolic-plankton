@@ -1,5 +1,17 @@
 
 ===== bioscan_E_euclidean_r64_v4 =====
 geometry=euclidean  sel_text=cumul  curv=1.0000  n=4878  ranks=['order', 'family', 'genus', 'species']
-  species top-1 acc = 0.8536  (95% CI [0.8438, 0.8635], 916 species)
+  species top-1 acc (DISTANCE) = 0.8536  (95% CI [0.8438, 0.8635], 916 species)
   inter-species proto dist = 0.9967  (MEAN separability — misleads; see NN below)
+Traceback (most recent call last):
+  File "/home/daniela/mine/hyperbolic-plankton/scripts/diagnose_geometry.py", line 232, in <module>
+    main()
+  File "/home/daniela/mine/hyperbolic-plankton/scripts/diagnose_geometry.py", line 228, in main
+    diagnose(args.ckpt, args.dataset, args.n, device)
+  File "/scratch/daniela/miniconda3/envs/dino_plankton/lib/python3.12/site-packages/torch/utils/_contextlib.py", line 124, in decorate_context
+    return func(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^
+  File "/home/daniela/mine/hyperbolic-plankton/scripts/diagnose_geometry.py", line 154, in diagnose
+    f"radius {proto_r.mean():.3f}  NN-sep {nn.mean():.3f} (median {nn.median():.3f})")
+              ^^^^^^^^^^^^
+AttributeError: 'NoneType' object has no attribute 'mean'

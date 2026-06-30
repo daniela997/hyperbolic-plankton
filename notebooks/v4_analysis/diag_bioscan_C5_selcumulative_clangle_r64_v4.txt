@@ -1,19 +1,21 @@
 
 ===== bioscan_C5_selcumulative_clangle_r64_v4 =====
-geometry=hyperbolic  sel_text=cumul  curv=1.0343  n=4878  ranks=['order', 'family', 'genus', 'species']
-  species top-1 acc = 0.6980  (95% CI [0.6851, 0.7116], 916 species)
-  inter-species proto dist = 0.0055  (MEAN separability — misleads; see NN below)
-  CLASSIFIER protos (cumulative species): radius 0.005  NN-sep 0.002 (median 0.002)
-  per-image margin = +0.000 (median +0.000, frac>0 0.690)
+geometry=hyperbolic  sel_text=cumul  curv=1.1415  n=4878  ranks=['order', 'family', 'genus', 'species']
+  species top-1 acc (DISTANCE) = 0.7353  (95% CI [0.7224, 0.7478], 916 species)
+  species top-1 acc (ANGLE/ATMG) = 0.7302  (95% CI [0.7183, 0.7427])
+  species top-1 acc (CONE-ENERGY/Dhall) = 0.0006  (95% CI [0.0000, 0.0014]; img inside own-species cone 1.00)
+  inter-species proto dist = 0.0013  (MEAN separability — misleads; see NN below)
+  CLASSIFIER protos (cumulative species): radius 0.001  NN-sep 0.000 (median 0.000)
+  per-image margin = +0.000 (median +0.000, frac>0 0.656)
   per-rank text [cumulative (= classifier space)]  radius   aperture
-    order     0.003    1.571
-    family    0.004    1.571
-    genus     0.004    1.571
-    species   0.005    1.571
+    order     0.001    1.571
+    family    0.001    1.571
+    genus     0.001    1.571
+    species   0.001    1.571
   edge            entail_ok  slack(ψp-ψc-angle)  fits%
-    order->family    0.940      -1.448             0.00
-    family->genus     0.995      -1.348             0.00
-    genus->species   0.967      -1.350             0.00
-  image in cone of:  order=0.54 family=1.00 genus=1.00 species=0.99 
-  image radius = 0.044 ± 0.084   image-dir mean pairwise cos = 0.264 (1=collapsed, 0=spread)
-  image<->own-species-text dist: cumul 0.040  |  cumulative(CL target) 0.040
+    order->family    0.978      -1.420             0.00
+    family->genus     0.902      -0.772             0.00
+    genus->species   0.939      -1.318             0.00
+  image in cone of:  order=1.00 family=1.00 genus=1.00 species=1.00 
+  image radius = 0.003 ± 0.000   image-dir mean pairwise cos = 0.390 (1=collapsed, 0=spread)
+  image<->own-species-text dist: cumul 0.002  |  cumulative(CL target) 0.002

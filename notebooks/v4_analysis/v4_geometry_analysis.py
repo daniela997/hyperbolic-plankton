@@ -49,7 +49,11 @@ def parse_diag(out):
              for p, c in [("order","family"),("family","genus"),("genus","species")]}
     incone = dict(re.findall(r"(order|family|genus|species)=([\d.]+)", out))
     return dict(
-        curv=g(r"curv=([\d.]+)"), top1=g(r"top-1 acc = ([\d.]+)"),
+        curv=g(r"curv=([\d.]+)"),
+        top1=g(r"top-1 acc \(DISTANCE\) = ([\d.]+)"),           # distance-to-prototype (our classifier)
+        top1_angle=g(r"top-1 acc \(ANGLE/ATMG\) = ([\d.]+)"),   # ATMG argmin-exterior-angle
+        top1_cone=g(r"top-1 acc \(CONE-ENERGY/Dhall\) = ([\d.]+)"),  # Dhall argmin cone-violation
+        cone_contained=g(r"img inside own-species cone ([\d.]+)"),   # frac img with zero species-cone violation
         sep=g(r"inter-species proto dist = ([\d.]+)"),          # MEAN sep — misleads, kept for contrast
         nn_sep=g(r"NN-sep ([\d.]+)"),                           # NEAREST-NEIGHBOUR sep — predicts F1
         margin=g(r"per-image margin = ([+\-\d.]+)"),            # per-image classification margin

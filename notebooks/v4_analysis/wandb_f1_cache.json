@@ -238,5 +238,45 @@
     "unseen_family_f1": NaN,
     "unseen_genus_f1": NaN,
     "unseen_species_f1": NaN
+  },
+  "bioscan_LS_lrclsp_selcumul_m0_r64_v4": {
+    "seen_order_f1": 0.785999716821741,
+    "unseen_order_f1": 0.5016246746996634,
+    "seen_family_f1": 0.7289326082581576,
+    "unseen_family_f1": 0.1692555654700012,
+    "seen_genus_f1": 0.597210114599027,
+    "unseen_genus_f1": 0.05614431158792242,
+    "seen_species_f1": 0.5973622460263519,
+    "unseen_species_f1": 0.05589653784574113
+  },
+  "bioscan_LS_lrclsp_selcumul_m05_r64_v4": {
+    "seen_order_f1": 0.7486950111877183,
+    "unseen_order_f1": 0.5118885069680206,
+    "seen_family_f1": 0.6928946885115191,
+    "unseen_family_f1": 0.17537736054053016,
+    "seen_genus_f1": 0.5744904663705763,
+    "unseen_genus_f1": 0.05765610421473666,
+    "seen_species_f1": 0.574758787383849,
+    "unseen_species_f1": 0.05759508645869851
+  },
+  "bioscan_LS_lrclsp_selcumul_m1_r64_v4": {
+    "seen_order_f1": 0.8358735361174989,
+    "unseen_order_f1": 0.4630273118498949,
+    "seen_family_f1": 0.6269415359884263,
+    "unseen_family_f1": 0.1368689611278252,
+    "seen_genus_f1": 0.4156860309587969,
+    "unseen_genus_f1": 0.043978313154582685,
+    "seen_species_f1": 0.4159988620737273,
+    "unseen_species_f1": 0.04351465106717694
+  },
+  "bioscan_LS_lrclsp_selcumul_m0_n1_r64_v4": {
+    "seen_order_f1": 0.7813481294726689,
+    "unseen_order_f1": 0.4445232121820948,
+    "seen_family_f1": 0.6467631718988514,
+    "unseen_family_f1": 0.14967503866768686,
+    "seen_genus_f1": 0.5075266266665569,
+    "unseen_genus_f1": 0.04788221667963342,
+    "seen_species_f1": 0.5074592778762578,
+    "unseen_species_f1": 0.047810025091193864
   }
 }

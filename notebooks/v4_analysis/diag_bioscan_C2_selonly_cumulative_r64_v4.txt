@@ -1,7 +1,9 @@
 
 ===== bioscan_C2_selonly_cumulative_r64_v4 =====
 geometry=hyperbolic  sel_text=cumul  curv=0.9906  n=4878  ranks=['order', 'family', 'genus', 'species']
-  species top-1 acc = 0.4994  (95% CI [0.4852, 0.5133], 916 species)
+  species top-1 acc (DISTANCE) = 0.4994  (95% CI [0.4852, 0.5133], 916 species)
+  species top-1 acc (ANGLE/ATMG) = 0.5109  (95% CI [0.4967, 0.5242])
+  species top-1 acc (CONE-ENERGY/Dhall) = 0.3374  (95% CI [0.3243, 0.3506]; img inside own-species cone 0.91)
   inter-species proto dist = 0.1525  (MEAN separability — misleads; see NN below)
   CLASSIFIER protos (cumulative species): radius 0.130  NN-sep 0.041 (median 0.040)
   per-image margin = +0.002 (median -0.000, frac>0 0.498)

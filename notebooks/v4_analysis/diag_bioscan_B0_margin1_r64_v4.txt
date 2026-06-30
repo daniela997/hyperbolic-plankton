@@ -1,7 +1,9 @@
 
 ===== bioscan_B0_margin1_r64_v4 =====
 geometry=hyperbolic  sel_text=indep  curv=1.0410  n=4878  ranks=['order', 'family', 'genus', 'species']
-  species top-1 acc = 0.7503  (95% CI [0.7376, 0.7626], 916 species)
+  species top-1 acc (DISTANCE) = 0.7503  (95% CI [0.7376, 0.7626], 916 species)
+  species top-1 acc (ANGLE/ATMG) = 0.1281  (95% CI [0.1187, 0.1371])
+  species top-1 acc (CONE-ENERGY/Dhall) = 0.0838  (95% CI [0.0765, 0.0916]; img inside own-species cone 0.00)
   inter-species proto dist = 1.8266  (MEAN separability — misleads; see NN below)
   CLASSIFIER protos (cumulative species): radius 1.453  NN-sep 0.429 (median 0.443)
   per-image margin = +0.102 (median +0.147, frac>0 0.748)
