@@ -1,0 +1,21 @@
+
+===== bioscan_H_hybrid_angle_selcumul_r64_v4 =====
+geometry=hyperbolic  sel_text=cumul  curv=0.8847  n=4878  ranks=['order', 'family', 'genus', 'species']
+  species top-1 acc (DISTANCE) = 0.8202  (95% CI [0.8096, 0.8309], 916 species)
+  species top-1 acc (ANGLE/ATMG) = 0.8432  (95% CI [0.8327, 0.8532])
+  species top-1 acc (CONE-ENERGY/Dhall) = 0.7821  (95% CI [0.7704, 0.7934]; img inside own-species cone 0.84)
+  inter-species proto dist = 0.1687  (MEAN separability — misleads; see NN below)
+  CLASSIFIER protos (cumulative species): radius 0.200  NN-sep 0.096 (median 0.100)
+  per-image margin = +0.006 (median +0.006, frac>0 0.816)
+  per-rank text [cumulative (= classifier space)]  radius   aperture
+    order     0.101    1.571
+    family    0.137    1.571
+    genus     0.175    1.571
+    species   0.198    1.571
+  edge            entail_ok  slack(ψp-ψc-angle)  fits%
+    order->family    0.936      -1.513             0.00
+    family->genus     0.990      -1.463             0.00
+    genus->species   0.999      -1.397             0.00
+  image in cone of:  order=0.83 family=0.98 genus=0.95 species=0.84 
+  image radius = 0.607 ± 0.030   image-dir mean pairwise cos = 0.407 (1=collapsed, 0=spread)
+  image<->own-species-text dist: cumul 0.568  |  cumulative(CL target) 0.568
