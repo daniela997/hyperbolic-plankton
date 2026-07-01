@@ -93,3 +93,28 @@ plain per-image mean, so the abundant SPECIES still weights (paper does NOT bala
 exactly-d is a GENUINELY ADDITIONAL mechanism the LRCL paper does not have — it removes the dominant
 species from the group. exactly-d is largely redundant for SPECIES F1 (dedup does that), but matters for
 keeping COARSE prototypes genuinely coarse (hierarchy). Our impl is CORRECT, not a bug.
+
+---
+
+## Provenance of the RINCE/hybrid tau values (min_tau=0.1, max_tau=0.5)
+
+FORMULA is faithfully ported from RINCE `get_dynamic_tau` (/home/daniela/other/rince/losses.py:254):
+`tau = min_tau + dissimilarity*(max_tau-min_tau)`.
+
+VALUES:
+- min_tau=0.1 — matches RINCE default exactly.
+- **max_tau=0.5 — DOES NOT match RINCE (their default is 0.2). It's 2.5x larger, ARBITRARY, undocumented,
+  never tuned** (present since the first RINCE commit bbc272b, no rationale). So our per-tier schedule is
+  MUCH wider than RINCE's:
+    rank    RINCE(max0.2)  OURS(max0.5)
+    species   0.100          0.100
+    genus     0.125          0.200
+    family    0.150          0.300
+    order     0.175          0.400
+  RINCE keeps all tiers in a tight 0.10-0.175 band; ours spreads 0.10-0.40 -> our COARSE ranks get much
+  SOFTER contrast than RINCE intends (could contribute to loose/collapsed coarse prototypes).
+Also: RINCE's `dissimilarity` is CONTINUOUS class-sim in [0,1]; ours is DISCRETE rank depth d/4.
+
+IMPLICATION: every RINCE + hybrid v4 run used a NON-STANDARD, un-justified tau schedule. The tau-matched
+runs (flat tau=1.0 = LRCL) test one extreme; we should ALSO test tau max=0.2 (RINCE's actual default) to
+know what a faithful RINCE would do. The launched tau=1.0 runs are the LRCL end, not the RINCE end.
