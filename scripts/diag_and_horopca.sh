@@ -47,13 +47,14 @@ for TAG in "${TAGS[@]}"; do
     echo "⏭️  diag $TAG exists (has ray metric) — skipping"
   fi
 
-  # --- HoroPCA (n=150 recipe; sel_text auto-read from ckpt by the script) ---
+  # --- HoroPCA (n=150 recipe). Do NOT pass --sel-text: let visualize_horopca auto-detect it from the
+  # ckpt (it correctly falls back to cumulative when lambda_sel==0, so CL-only runs don't get the
+  # spurious "species (classifier)" protos — those belong only to independent-SEL runs). ---
   if [ -n "$FORCE" ] || [ ! -s "$horo" ]; then
     echo "🖼️  horopca $TAG (GPU $G)"
-    st=$($PY -c "import torch;print(torch.load('$fp',map_location='cpu').get('args',{}).get('sel_text','cumulative'))" 2>/dev/null)
     PYTHONPATH=src CUDA_VISIBLE_DEVICES=$G PYTORCH_ALLOC_CONF=expandable_segments:True \
       "$PY" scripts/visualize_horopca.py --ckpt "$fp" --dataset bioscan --backbone clip --lora --lora-r 64 \
-      --sel-text "$st" --split test_seen --n 150 --out "$horo" 2>&1 \
+      --split test_seen --n 150 --out "$horo" 2>&1 \
       | grep -vE "Warning|warn|UserWarning|will be removed|FutureWarning" | tail -2
   else
     echo "⏭️  horopca $TAG exists — skipping"
