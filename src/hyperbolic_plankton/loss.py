@@ -395,10 +395,15 @@ def radial_ordering_loss(text_embs, img, ranks, curv, margin=0.2):
     see docs/curvature-feasibility.md). This term's gradient EXPLICITLY pushes coarse ranks inward
     and fine ranks/images outward — the radial driver SEL lacks — coupling to higher curvature.
 
-    Uses MEAN per-point radius per level, NOT the Einstein-centroid radius: the centroid radius
-    SATURATES at large radius (Klein compression + direction-cancellation), so it can't distinguish
-    the fine ranks (genus/species/image all compress to ~the same centroid radius) — exactly where
-    we need the spread. Mean radius tracks the shell radius without saturating.
+    Uses MEAN per-point radius per level, NOT the Einstein-centroid radius: the centroid of a
+    concentric RING collapses toward the origin (a fully-spread ring's centroid is at the origin by
+    symmetry in ANY geometry; but for a PARTIALLY-spread ring the HYPERBOLIC Einstein centroid is
+    dragged toward the origin MORE than the Euclidean mean — Klein compression down-weights far-out
+    points. Measured: ring at radius 4, 120° spread -> Euclid centroid r=3.8 but Einstein r=1.2). So
+    rank centroids squash into a narrow near-origin band regardless of true shell radius and can't
+    distinguish the fine ranks — exactly where we need the spread. MEAN radius averages the SCALAR
+    radii (no vector cancellation, no Klein compression) -> tracks true shell radius exactly (ring at
+    radius 4 -> mean radius 4.0 for any spread).
 
     For each consecutive level pair (coarser, finer): `relu(ρ̄(coarser) − ρ̄(finer) + margin)`,
     ρ̄ = mean distance_from_origin. Zero only when each finer level is ≥ margin further out; cannot
