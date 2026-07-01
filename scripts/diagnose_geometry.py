@@ -143,8 +143,18 @@ def diagnose(path, dataset, n, device):
         mult = inside.sum(0).float()                      # [B] #cones containing each image
         own = inside.gather(0, true.unsqueeze(0)).squeeze(0).bool()  # image in its own cone?
         uniq_frac = (mult[own] == 1).float().mean().item() if own.any() else 0.0
+        # CAUTION: mult~1 is NOT genuine separation if apertures are SATURATED at pi/2 — then every
+        # cone is a half-space and "containment" is trivial (image in the same hemisphere). Report the
+        # saturated fraction + a slack check (does containment survive tightening psi?) to catch this.
+        psi_all = L.half_aperture(P, curv)
+        sat = (psi_all > 1.55).float().mean().item()      # frac cones at the pi/2 ceiling
+        tight_in = (torch.clamp(L.pairwise_oxy_angle(P, img, curv)
+                    - 0.5 * psi_all.unsqueeze(1), min=0.0)
+                    .gather(0, true.unsqueeze(0)).squeeze(0) == 0).float().mean().item()
         print(f"  cone multiplicity: mean {mult.mean().item():.2f}  median {int(mult.median().item())}  "
               f"(of contained imgs, {uniq_frac:.2f} inside EXACTLY 1 = uniquely own cone)")
+        print(f"    [aperture: {sat:.0%} cones SATURATED at pi/2; containment at psi*0.5 = {tight_in:.2f} "
+              f"(if ~0, containment is degenerate/half-space, NOT genuine separation)")
     offdiag = (L.pairwise_dist(P, P, curv) if geom != "euclidean"
                else 1 - torch.nn.functional.normalize(P, dim=-1) @ torch.nn.functional.normalize(P, dim=-1).T)
     od = offdiag[~torch.eye(len(uniq), dtype=bool, device=device)]
