@@ -86,6 +86,10 @@ They fix DIFFERENT halves of the multi-image problem (not redundant):
 
 Measured (dist genus_text → its dominant-species text): hybrid 0.212 > LRCL-all 0.176 — exactly-d
 keeps genus ~20% further from its biggest child, confirming the mechanism (modest effect, coarse-rank
-only). NB the "group-balanced" comment is a per-IMAGE mean, NOT per-sub-species balancing — abundance
-still weights within the remaining group. exactly-d is largely redundant for SPECIES F1 (dedup does
-that), but matters for keeping COARSE prototypes genuinely coarse (hierarchy).
+only). NB our T→I EXACTLY MATCHES LRCL paper Eq.2 (verified): `(1/|P_k|)·mean over group images` +
+`(1/|K|)·mean over anchors`. The paper's "group-balanced" balances across SAME-LEVEL CLASSES (anchors
+K — a 50-image genus doesn't drown a 3-image genus), which we HAVE. But within ONE genus group it is a
+plain per-image mean, so the abundant SPECIES still weights (paper does NOT balance sub-classes). So
+exactly-d is a GENUINELY ADDITIONAL mechanism the LRCL paper does not have — it removes the dominant
+species from the group. exactly-d is largely redundant for SPECIES F1 (dedup does that), but matters for
+keeping COARSE prototypes genuinely coarse (hierarchy). Our impl is CORRECT, not a bug.
