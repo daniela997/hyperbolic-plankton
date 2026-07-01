@@ -247,7 +247,7 @@ def encode_cl_features(model, pixel_values, taxonomy_batch, ranks, cl_mask, geom
 
 def forward_loss(model, pixel_values, taxonomy_batch, lambda_sel, stats=None,
                  sel_indep=True, contrastive="distance", ranks=RANKS,
-                 sel_tau=1.0, sel_leak=0.0, sel_uncertainty=0.0, sel_margin=0.0, sel_neg_margin=0.0, sel_detach_parent=False, cl_mask="none", lambda_cl=1.0,
+                 sel_tau=1.0, sel_leak=0.0, sel_uncertainty=0.0, sel_margin=0.0, sel_neg_margin=0.0, cl_mask="none", lambda_cl=1.0,
                  geometry="hyperbolic", rince_min_tau=0.1, rince_max_tau=0.5, rince_sim="distance",
                  lrcl_ranks="all"):
     """lambda_cl*contrastive(img, deepest_text) + lambda_sel*SEL. `model` may be a DDP
@@ -319,7 +319,6 @@ def forward_loss(model, pixel_values, taxonomy_batch, lambda_sel, stats=None,
         img, cum_embs, taxonomy_batch, ranks, curv, stats=stats, sel_text_embs=sel_embs,
         tau=sel_tau, leak=sel_leak, lam_u=sel_uncertainty, cone_margin=sel_margin,
         neg_cone_margin=sel_neg_margin,
-        detach_parent=sel_detach_parent,
     )
     if stats is not None:
         stats["loss_terms/sel_intra"] = intra.detach().item()
@@ -421,11 +420,6 @@ def main():
                          "to species separation by containment. Text-text only (sel_inter's child is an "
                          "image point with no meaningful cone). Hierarchy-aware complement to CL's flat "
                          "species separation. 0=off")
-    ap.add_argument("--sel-detach-parent", action="store_true",
-                    help="stop gradient to the PARENT in the SEL-intra hinge: containment can only "
-                         "be satisfied by pushing the CHILD outward, not by shrinking the parent to "
-                         "widen its cone. Fixes origin-collapse at the root cause (the bare hinge's "
-                         "cheapest descent is shrink-parent -> coarse ranks collapse to origin).")
     ap.add_argument("--sel-text", default="independent", choices=["independent", "cumulative"],
                     help="text form for BOTH SEL terms (intra Eq.3 + inter Eq.4). Paper uses "
                          "independent per-rank embeddings T_r ('Rank: Value') for SEL and the "
@@ -791,7 +785,6 @@ def main():
                             contrastive=args.contrastive, ranks=ranks, sel_tau=args.sel_tau,
                             sel_leak=args.sel_leak, sel_uncertainty=args.sel_uncertainty,
                             sel_margin=args.sel_margin, sel_neg_margin=args.sel_neg_margin,
-                            sel_detach_parent=args.sel_detach_parent,
                             cl_mask=args.cl_mask,
                             lambda_cl=0.0, geometry=args.geometry,
                             rince_min_tau=args.rince_min_tau, rince_max_tau=args.rince_max_tau,
@@ -828,7 +821,7 @@ def main():
                         sel_tau=args.sel_tau, sel_leak=args.sel_leak,
                         sel_uncertainty=args.sel_uncertainty, sel_margin=args.sel_margin,
                         sel_neg_margin=args.sel_neg_margin,
-                        sel_detach_parent=args.sel_detach_parent, cl_mask=args.cl_mask,
+                        cl_mask=args.cl_mask,
                         lambda_cl=args.lambda_cl, geometry=args.geometry,
                         rince_min_tau=args.rince_min_tau, rince_max_tau=args.rince_max_tau,
                         rince_sim=args.rince_sim, lrcl_ranks=args.lrcl_ranks,
