@@ -47,4 +47,9 @@ run "bioscan_H_hybrid_angle_radial05_r64_v4" --lambda-radial 0.5
 run "bioscan_H_hybrid_angle_radial1_r64_v4"  --lambda-radial 1.0
 run "bioscan_H_hybrid_angle_radial2_r64_v4"  --lambda-radial 2.0
 
-echo -e "\n✅ hybrid-angle radial sweep complete."
+# A/B control: SAME lambda 1.0 but Einstein-CENTROID radius (ATMG Eq.12) instead of MEAN radius.
+# Confirms empirically that the centroid collapses the fine ranks (blind to shell radius) where mean
+# radius does not — expected to be much weaker than radial1 above.
+run "bioscan_H_hybrid_angle_centroid1_r64_v4" --lambda-radial 1.0 --radial-centroid
+
+echo -e "\n✅ hybrid-angle radial sweep + centroid A/B complete."

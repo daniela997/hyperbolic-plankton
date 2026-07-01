@@ -385,7 +385,7 @@ def hybrid_graded_loss(img, text_embs, taxonomy_batch, ranks, curv, scale,
     return total / max(n, 1)
 
 
-def radial_ordering_loss(text_embs, img, ranks, curv, margin=0.2):
+def radial_ordering_loss(text_embs, img, ranks, curv, margin=0.2, use_centroid=False):
     """Radial-ordering driver: push each level's MEAN radius to INCREASE down the hierarchy
     (order < family < ... < species < image). Generalises ATMG's 2-level L_centroid (text centroid
     nearer origin than image centroid, paper Eq. 12) to our per-rank hierarchy.
@@ -408,13 +408,21 @@ def radial_ordering_loss(text_embs, img, ranks, curv, margin=0.2):
     For each consecutive level pair (coarser, finer): `relu(ρ̄(coarser) − ρ̄(finer) + margin)`,
     ρ̄ = mean distance_from_origin. Zero only when each finer level is ≥ margin further out; cannot
     be satisfied by collapse (all radii equal → all hinges active). Returns a scalar.
+
+    `use_centroid=True`: use the Einstein-CENTROID radius per rank instead of the mean radius — this
+    is ATMG's actual Eq.12 form. The A/B control that empirically confirms the centroid collapses the
+    fine ranks (see docstring above); expected to be MUCH weaker than the mean-radius default.
     """
+    def rank_radius(pts):
+        if use_centroid:
+            return L.distance_from_origin(L.einstein_midpoint(pts, curv)[None], curv)[0]
+        return L.distance_from_origin(pts, curv).mean()
     radii = []
     for r in ranks:
         if r in text_embs and bool(text_embs[f"{r}_valid"].any()):
             v = text_embs[f"{r}_valid"]
-            radii.append(L.distance_from_origin(text_embs[r][v], curv).mean())
-    radii.append(L.distance_from_origin(img, curv).mean())  # image = deepest level
+            radii.append(rank_radius(text_embs[r][v]))
+    radii.append(rank_radius(img))  # image = deepest level
     if len(radii) < 2:
         return img.new_zeros(())
     loss = img.new_zeros(())

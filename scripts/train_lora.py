@@ -372,6 +372,10 @@ def main():
                          "anti-collapse radial driver SEL lacks; use INSTEAD of SEL with angle-CL "
                          "(ATMG: angle-CL is the smoothed entailment, needs the centroid term not "
                          "the hard hinge). 0 = off.")
+    ap.add_argument("--radial-centroid", action="store_true",
+                    help="use the Einstein-CENTROID radius per rank instead of MEAN radius in "
+                         "radial_ordering_loss (ATMG's actual Eq.12 form). A/B control: expected to "
+                         "collapse the fine ranks (centroid of a ring -> origin). Default = mean radius.")
     ap.add_argument("--geometry", default="hyperbolic", choices=["hyperbolic", "euclidean"],
                     help="hyperbolic=Lorentz lift + (CL[+SEL]); euclidean=flat CLIP InfoNCE "
                          "baseline (open_clip ClipLoss, cosine; no SEL/lift). The Euclidean-LoRA "
@@ -777,7 +781,8 @@ def main():
                         # CL (local_cum/local_i, spliced+detached): full-batch mean radii, grad through
                         # the fresh slice only -> summed over micros = full-batch gradient, exactly like CL.
                         if args.geometry != "euclidean" and args.lambda_radial > 0:
-                            rad = radial_ordering_loss(local_cum, local_i, ranks, core.curvature)
+                            rad = radial_ordering_loss(local_cum, local_i, ranks, core.curvature,
+                                                       use_centroid=args.radial_centroid)
                             radial_loss = args.lambda_radial * rad
                             radial_val = float(rad.detach())
                     elif args.contrastive == "ranked":
