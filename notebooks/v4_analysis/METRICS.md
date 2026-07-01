@@ -68,3 +68,24 @@ separation classifies as well as a spread one). **Global spread (mean-sep, HoroP
 classification.** Every hierarchy mechanism (cones/SEL, angle-CL, even radial) is a **tax on NN-sep**,
 never a gain — so no config gets good classification *and* good hierarchy at c≈1. See the memory notes
 `nn-separability-not-mean`, `containment-vs-discrimination`, `angle-collapses-coarse-ranks`.
+
+---
+
+## Note: what exactly-d (RINCE grading) does in hybrid, vs dedup (LRCL)
+
+They fix DIFFERENT halves of the multi-image problem (not redundant):
+
+- **dedup** (LRCL) — on the TEXT/negative axis: one unique prototype per class, so same-species
+  images are never false NEGATIVES. Fixes the InfoNCE multi-image problem on the negative side.
+- **exactly-d** (RINCE grading) — on the IMAGE/positive axis of T→I. A coarse (genus) prototype's
+  T→I positives are ALL its images via `-logp[u, posmask].mean()` (loss.py:311). That mean is
+  **per-image**, so it is ABUNDANCE-WEIGHTED: if species-A has 50 imgs and B/C have 3+2, the genus
+  prototype is pulled 50/55 toward species-A → genus collapses onto its dominant child. Dedup does
+  NOT fix this (positive images aren't deduped). exactly-d DROPS the representative (dominant) species'
+  images from the group → genus pulled toward the cross-species residual, staying distinct.
+
+Measured (dist genus_text → its dominant-species text): hybrid 0.212 > LRCL-all 0.176 — exactly-d
+keeps genus ~20% further from its biggest child, confirming the mechanism (modest effect, coarse-rank
+only). NB the "group-balanced" comment is a per-IMAGE mean, NOT per-sub-species balancing — abundance
+still weights within the remaining group. exactly-d is largely redundant for SPECIES F1 (dedup does
+that), but matters for keeping COARSE prototypes genuinely coarse (hierarchy).
