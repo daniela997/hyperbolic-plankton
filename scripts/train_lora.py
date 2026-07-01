@@ -46,6 +46,7 @@ from hyperbolic_plankton.loss import (
     hyperbolic_contrastive_loss_ddp,
     level_restricted_accum,
     level_restricted_loss,
+    radial_ordering_loss,
     ranked_contrastive_loss_ddp,
     stable_lineage_ids,
     stacked_entailment_loss,
@@ -365,6 +366,12 @@ def main():
     ap.add_argument("--lambda-cl", type=float, default=1.0,
                     help="weight on the contrastive term. 0 = SEL-only (paper's strongest "
                          "unseen rows); --lambda-sel 0 = CL-only")
+    ap.add_argument("--lambda-radial", type=float, default=0.0,
+                    help="weight on radial_ordering_loss (ATMG Eq.12 L_centroid, generalised to "
+                         "per-rank): pushes mean radius to INCREASE order<...<species<image. The "
+                         "anti-collapse radial driver SEL lacks; use INSTEAD of SEL with angle-CL "
+                         "(ATMG: angle-CL is the smoothed entailment, needs the centroid term not "
+                         "the hard hinge). 0 = off.")
     ap.add_argument("--geometry", default="hyperbolic", choices=["hyperbolic", "euclidean"],
                     help="hyperbolic=Lorentz lift + (CL[+SEL]); euclidean=flat CLIP InfoNCE "
                          "baseline (open_clip ClipLoss, cosine; no SEL/lift). The Euclidean-LoRA "
@@ -530,6 +537,10 @@ def main():
     if args.no_proj and args.geometry != "euclidean":
         raise SystemExit("--no-proj is euclidean-only (hyperbolic needs a projection into "
                          "the lift). Use --geometry euclidean.")
+    if args.lambda_radial > 0 and not (args.contrastive == "hybrid" and args.cache_accum_cl):
+        raise SystemExit("--lambda-radial is wired only in the hybrid + --cache-accum-cl path "
+                         "(radial is GradCached alongside the hybrid CL). Use --contrastive hybrid "
+                         "--cache-accum-cl, or extend the wiring.")
 
     ddp = "RANK" in os.environ
     if ddp:
@@ -681,7 +692,7 @@ def main():
     ddp_model.train()
     it = 0
     t0 = time.perf_counter()
-    run_cl = run_sel = run_loss = 0.0
+    run_cl = run_sel = run_loss = run_radial = 0.0
     best_unseen = -1.0  # track best periodic unseen mean-F1 -> save _best.pt (peak often mid-run)
     data_iter = iter(loader)
     epoch = 0
@@ -730,6 +741,8 @@ def main():
                     # full local set: fresh micro spliced into its position (OpenCLIP l.154)
                     local_i = torch.cat(cache_i[:micro] + [img] + cache_i[micro + 1:])
                     local_t = torch.cat(cache_t[:micro] + [deepest] + cache_t[micro + 1:])
+                    radial_loss = img.new_zeros(())   # radial (ATMG L_centroid) — set in the hybrid branch
+                    radial_val = 0.0
                     if args.contrastive == "level-restricted":
                         # LRCL is symmetric (T->I scores texts vs ALL IMAGES) so it needs the image
                         # GradCache too. Splice the fresh per-rank texts into the cached full set;
@@ -760,6 +773,13 @@ def main():
                             core.logit_scale.exp(),
                             sim=("euclidean" if args.geometry == "euclidean" else args.rince_sim),
                             min_tau=args.rince_min_tau, max_tau=args.rince_max_tau)
+                        # radial-ordering (ATMG L_centroid) on the SAME GradCached full-768 set as
+                        # CL (local_cum/local_i, spliced+detached): full-batch mean radii, grad through
+                        # the fresh slice only -> summed over micros = full-batch gradient, exactly like CL.
+                        if args.geometry != "euclidean" and args.lambda_radial > 0:
+                            rad = radial_ordering_loss(local_cum, local_i, ranks, core.curvature)
+                            radial_loss = args.lambda_radial * rad
+                            radial_val = float(rad.detach())
                     elif args.contrastive == "ranked":
                         local_lin = torch.cat(cache_lin)  # [accum*mb, R]; fresh-vs-cached identical ids
                         cl = ranked_contrastive_loss_ddp(
@@ -792,15 +812,18 @@ def main():
                         sel_val = float(sel_det)         # sel_loss already = lambda_sel * sel
                     # OpenCLIP backprops the full-set CE for EACH micro with NO /accum (l.162): the
                     # active slice differs per micro, so summing over micros gives each slice its
-                    # full-set gradient exactly once. SEL is genuinely per-micro -> /accum to average.
-                    loss = args.lambda_cl * cl + sel_loss / args.accum
+                    # full-set gradient exactly once. radial is GradCached ALONGSIDE CL (full-768,
+                    # grad-through-fresh-slice) -> summed, NO /accum, like CL. SEL is per-micro -> /accum.
+                    loss = args.lambda_cl * cl + radial_loss + sel_loss / args.accum
                 scaler.scale(loss).backward()
                 # log per-micro-normalised so the displayed loss ≈ cl + lambda_sel*sel: cl is the
                 # accum-summed full-set CE, so /accum here to match cl/sel; the BACKWARD'd loss above
                 # keeps cl un-divided by design (OpenCLIP) — this is logging only, not the gradient.
-                run_loss += cl.item() / args.accum + args.lambda_sel * sel_val / args.accum
+                run_loss += (cl.item() + args.lambda_radial * radial_val) / args.accum \
+                    + args.lambda_sel * sel_val / args.accum
                 run_cl += cl.item() / args.accum
                 run_sel += sel_val
+                run_radial += radial_val / args.accum   # full-768 like cl -> same /accum display norm
         else:
             # standard accumulation: CL negatives = micro_bs * world per micro-batch
             for micro in range(args.accum):
@@ -844,9 +867,11 @@ def main():
             n = args.log_every * args.accum
             ips = args.log_every * eff_batch / (time.perf_counter() - t0)
             avg_loss, avg_cl, avg_sel = run_loss / n, run_cl / n, run_sel / n
+            avg_radial = run_radial / n
             lr = sched.get_last_lr()[0]
+            rad_str = f"rad {avg_radial:.4f} " if args.lambda_radial > 0 else ""
             log(f"it {it:>6}/{total_iters} | loss {avg_loss:.4f} cl {avg_cl:.4f} "
-                f"sel {avg_sel:.4f} | lr {lr:.2e} | curv {model.curvature.item():.3f} | "
+                f"sel {avg_sel:.4f} {rad_str}| lr {lr:.2e} | curv {model.curvature.item():.3f} | "
                 f"{ips:.0f} img/s")
             if wb is not None:
                 payload = {
@@ -860,7 +885,7 @@ def main():
                 payload.update({f"train/{k}": v for k, v in sel_terms.items()})
                 wb.log(payload, step=it)
             sel_terms.clear()
-            run_cl = run_sel = run_loss = 0.0
+            run_cl = run_sel = run_loss = run_radial = 0.0
             t0 = time.perf_counter()
 
         # periodic eval (rank 0). Other ranks wait at a barrier so DDP stays in lockstep.
