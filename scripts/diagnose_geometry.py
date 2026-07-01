@@ -135,6 +135,16 @@ def diagnose(path, dataset, n, device):
         frac_contained = (cone_E.gather(0, true.unsqueeze(0)).squeeze(0) == 0).float().mean().item()
         print(f"  species top-1 acc (CONE-ENERGY/Dhall) = {acc_e:.4f}  (95% CI [{lo_e:.4f}, {hi_e:.4f}]; "
               f"img inside own-species cone {frac_contained:.2f})")
+        # ---- cone MULTIPLICITY: how many species cones contain each image (cone_E==0 -> inside). ----
+        # Distinguishes GENUINE containment (mult~1, image in its OWN cone only -> discriminative) from
+        # OVERLAP-CLUSTERING (mult>>1, image in many cones at once -> containment useless, as in SEL-only
+        # C2: mult 6.6). High inSp with high mult = fake containment; high inSp with mult~1 = real.
+        inside = (cone_E == 0.0)                          # [C, B]
+        mult = inside.sum(0).float()                      # [B] #cones containing each image
+        own = inside.gather(0, true.unsqueeze(0)).squeeze(0).bool()  # image in its own cone?
+        uniq_frac = (mult[own] == 1).float().mean().item() if own.any() else 0.0
+        print(f"  cone multiplicity: mean {mult.mean().item():.2f}  median {int(mult.median().item())}  "
+              f"(of contained imgs, {uniq_frac:.2f} inside EXACTLY 1 = uniquely own cone)")
     offdiag = (L.pairwise_dist(P, P, curv) if geom != "euclidean"
                else 1 - torch.nn.functional.normalize(P, dim=-1) @ torch.nn.functional.normalize(P, dim=-1).T)
     od = offdiag[~torch.eye(len(uniq), dtype=bool, device=device)]
