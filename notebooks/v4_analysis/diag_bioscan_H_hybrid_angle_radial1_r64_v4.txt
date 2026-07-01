@@ -1,0 +1,24 @@
+
+===== bioscan_H_hybrid_angle_radial1_r64_v4 =====
+geometry=hyperbolic  sel_text=cumul  curv=0.8779  n=4878  ranks=['order', 'family', 'genus', 'species']
+  species top-1 acc (DISTANCE) = 0.7599  (95% CI [0.7480, 0.7720], 916 species)
+  species top-1 acc (ANGLE/ATMG) = 0.8401  (95% CI [0.8298, 0.8508])
+  species top-1 acc (CONE-ENERGY/Dhall) = 0.7333  (95% CI [0.7212, 0.7452]; img inside own-species cone 0.00)
+  cone multiplicity: mean 0.00  median 0  (of contained imgs, 0.00 inside EXACTLY 1 = uniquely own cone)
+    [aperture: 0% cones SATURATED at pi/2; containment at psi*0.5 = 0.00 (if ~0, containment is degenerate/half-space, NOT genuine separation)
+  inter-species proto dist = 0.5733  (MEAN separability — misleads; see NN below)
+  CLASSIFIER protos (cumulative species): radius 0.653  NN-sep 0.327 (median 0.352)
+  per-image margin = +0.024 (median +0.024, frac>0 0.756)
+  per-rank text [cumulative (= classifier space)]  radius   aperture
+    order     0.067    1.570
+    family    0.272    1.042
+    genus     0.478    0.450
+    species   0.682    0.298
+  edge            entail_ok  slack(ψp-ψc-angle)  fits%
+    order->family    0.929      -0.945             0.00
+    family->genus     0.065      -0.983             0.00
+    genus->species   0.000      -1.381             0.00
+  image in cone of:  order=0.00 family=0.00 genus=0.00 species=0.00 
+  image radius = 1.002 ± 0.032   image-dir mean pairwise cos = 0.783 (1=collapsed, 0=spread)
+  image RAY-collapse: cos-to-mean-ray = 0.885 (1=on one ray)  eff-dim = 25.6/512
+  image<->own-species-text dist: cumul 0.862  |  cumulative(CL target) 0.862
