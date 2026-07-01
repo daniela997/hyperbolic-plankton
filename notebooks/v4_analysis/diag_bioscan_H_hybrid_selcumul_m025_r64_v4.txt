@@ -1,0 +1,14 @@
+  species top-1 acc (DISTANCE) = 0.8161  (95% CI [0.8048, 0.8272], 916 species)
+  species top-1 acc (ANGLE/ATMG) = 0.8163  (95% CI [0.8048, 0.8272])
+  species top-1 acc (CONE-ENERGY/Dhall) = 0.7864  (95% CI [0.7743, 0.7975]; img inside own-species cone 0.71)
+  inter-species proto dist = 0.3832  (MEAN separability — misleads; see NN below)
+  per-rank text [cumulative (= classifier space)]  radius   aperture
+    order     0.095    1.540
+    family    0.185    1.547
+    genus     0.233    1.326
+    species   0.278    0.932
+    order->family    0.882      -1.279             0.00
+    family->genus     0.890      -1.045             0.00
+    genus->species   0.996      -0.430             0.00
+  image in cone of:  order=0.95 family=0.97 genus=0.97 species=0.71 
+  image radius = 0.476 ± 0.015   image-dir mean pairwise cos = 0.082 (1=collapsed, 0=spread)
