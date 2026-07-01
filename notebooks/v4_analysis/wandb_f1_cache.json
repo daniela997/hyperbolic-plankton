@@ -368,5 +368,15 @@
     "unseen_genus_f1": 0.07138411194305275,
     "seen_species_f1": 0.7201203610288708,
     "unseen_species_f1": 0.071210327598205
+  },
+  "bioscan_H_hybrid_angle_radial2_r64_v4": {
+    "seen_order_f1": 0.8905207862797593,
+    "unseen_order_f1": 0.572083719358542,
+    "seen_family_f1": 0.8578171783260002,
+    "unseen_family_f1": 0.2199109300163528,
+    "seen_genus_f1": 0.6925695792653357,
+    "unseen_genus_f1": 0.06876482062780113,
+    "seen_species_f1": 0.6929074680790651,
+    "unseen_species_f1": 0.068716527209377
   }
 }
