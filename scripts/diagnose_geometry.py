@@ -225,6 +225,17 @@ def diagnose(path, dataset, n, device):
     offc = cos[~torch.eye(n, dtype=bool, device=device)]
     print(f"  image radius = {ir.mean():.3f} ± {ir.std():.3f}   "
           f"image-dir mean pairwise cos = {offc.mean():.3f} (1=collapsed, 0=spread)")
+    # RAY-collapse: is everything strung along ONE shared direction (looks like a single ray in PCA)?
+    # cos-to-mean-ray ~1 = all points on the mean ray; eff-dim (participation ratio of the centered
+    # SVD spectrum) ~1 = truly 1D. Distinguishes ray-collapse (angular, needs contrastive) from a
+    # healthy spread. NOTE: radial loss slides points ALONG their rays -> won't fix a ray-collapse.
+    mean_ray = torch.nn.functional.normalize(img.mean(0), dim=-1)
+    ray_cos = (dn @ mean_ray).mean().item()
+    sv = torch.linalg.svdvals((img - img.mean(0)).float())
+    s2 = sv**2
+    eff_dim = (s2.sum() ** 2 / (s2 ** 2).sum()).item()
+    print(f"  image RAY-collapse: cos-to-mean-ray = {ray_cos:.3f} (1=on one ray)  "
+          f"eff-dim = {eff_dim:.1f}/{img.shape[1]}")
     # image <-> its own species text distance. For indep runs txt["species"] is the SEL (independent)
     # species — NOT what the image is CL-aligned to. Report both: image<->SEL-species and the
     # image<->cumulative-species (cum["species"], the CL/classifier target).
