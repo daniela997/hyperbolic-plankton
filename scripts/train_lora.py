@@ -732,9 +732,18 @@ def main():
             # ranked CL needs per-micro lineage ids ([B,R]) for the full local set
             cache_lin = ([stable_lineage_ids(tb, ranks, device) for _, tb in micros]
                          if args.contrastive == "ranked" else None)
-            # LRCL/hybrid need the per-rank cumulative text embeddings (c[3]=cum_embs) for the full set
-            cache_cum = ([c[3] for c in cached]
-                         if args.contrastive in ("level-restricted", "hybrid") else None)
+            # GradCache is LOSS-AGNOSTIC: any enabled loss runs on the full spliced batch. SEL needs the
+            # per-rank cumulative text (like LRCL/hybrid), so cache cum_embs (c[3]) when SEL is on too.
+            sel_on = args.geometry != "euclidean" and args.lambda_sel > 0
+            need_cum = args.contrastive in ("level-restricted", "hybrid") or sel_on
+            cache_cum = [c[3] for c in cached] if need_cum else None
+            # sel_text=independent uses a SEPARATE per-rank encode for SEL -> cache it too so it splices.
+            sel_indep = args.sel_text == "independent"
+            core0 = ddp_model.module if ddp else ddp_model
+            cache_selindep = None
+            if sel_on and sel_indep:
+                with torch.no_grad(), torch.amp.autocast("cuda"):
+                    cache_selindep = [core0.encode_taxonomy(tb, indep=True) for _, tb in micros]
             for micro, (pixel_values, taxonomy_batch) in enumerate(micros):
                 last_micro = micro == args.accum - 1
                 step_stats = sel_terms if (is_log_iter and last_micro and is_main()) else None
@@ -798,28 +807,44 @@ def main():
                         cl = accum_contrastive_loss_ddp(
                             kind, local_i, local_t, core.curvature, core.logit_scale.exp(),
                             local_ids=local_ids)
-                    # SEL per micro-batch via forward_loss's SEL branch (lambda_cl=0 → SEL only).
-                    # Take the FIRST return (the grad-carrying loss = lambda_sel*sel); the 3rd
-                    # return is sel.DETACHED (logging) and would give SEL zero gradient.
+                    # SEL on the FULL GradCached batch (not per-micro): splice the fresh micro's per-rank
+                    # text into the cached full set (fresh carries grad, cached detached) — same trick as
+                    # CL. Summing over micros = full-batch SEL gradient. This lets SEL SEE the whole batch
+                    # (sibling species co-occur ~350x per step vs ~11 per-micro), so it can orient genus
+                    # wedges instead of only pulling lone species onto an axis.
                     sel_loss = cl.new_zeros(())
                     sel_val = 0.0
-                    if args.geometry != "euclidean" and args.lambda_sel > 0:
-                        sel_loss, _, sel_det = forward_loss(
-                            ddp_model, pixel_values, taxonomy_batch, args.lambda_sel,
-                            stats=step_stats, sel_indep=(args.sel_text == "independent"),
-                            contrastive=args.contrastive, ranks=ranks, sel_tau=args.sel_tau,
-                            sel_leak=args.sel_leak, sel_uncertainty=args.sel_uncertainty,
-                            sel_margin=args.sel_margin, sel_neg_margin=args.sel_neg_margin,
-                            cl_mask=args.cl_mask,
-                            lambda_cl=0.0, geometry=args.geometry,
-                            rince_min_tau=args.rince_min_tau, rince_max_tau=args.rince_max_tau,
-                            rince_sim=args.rince_sim, lrcl_ranks=args.lrcl_ranks)
-                        sel_val = float(sel_det)         # sel_loss already = lambda_sel * sel
-                    # OpenCLIP backprops the full-set CE for EACH micro with NO /accum (l.162): the
-                    # active slice differs per micro, so summing over micros gives each slice its
-                    # full-set gradient exactly once. radial is GradCached ALONGSIDE CL (full-768,
-                    # grad-through-fresh-slice) -> summed, NO /accum, like CL. SEL is per-micro -> /accum.
-                    loss = args.lambda_cl * cl + radial_loss + sel_loss / args.accum
+                    if sel_on:
+                        sel_cum = {r: torch.cat([cache_cum[k][r] if k != micro else cum_fresh[r]
+                                                 for k in range(args.accum)]) for r in ranks}
+                        for r in ranks:
+                            sel_cum[f"{r}_valid"] = torch.cat(
+                                [cache_cum[k][f"{r}_valid"] for k in range(args.accum)])
+                        sel_tb = {r: [lab for k in range(args.accum) for lab in micros[k][1][r]]
+                                  for r in ranks}
+                        if sel_indep:
+                            selindep_fresh = core.encode_taxonomy(taxonomy_batch, indep=True)  # grad
+                            sel_embs = {r: torch.cat([cache_selindep[k][r] if k != micro else selindep_fresh[r]
+                                                      for k in range(args.accum)]) for r in ranks}
+                            for r in ranks:
+                                sel_embs[f"{r}_valid"] = torch.cat(
+                                    [cache_selindep[k][f"{r}_valid"] for k in range(args.accum)])
+                        else:
+                            sel_embs = sel_cum
+                        sel, intra, inter = stacked_entailment_loss(
+                            local_i, sel_cum, sel_tb, ranks, core.curvature, stats=step_stats,
+                            sel_text_embs=sel_embs, tau=args.sel_tau, leak=args.sel_leak,
+                            lam_u=args.sel_uncertainty, cone_margin=args.sel_margin,
+                            neg_cone_margin=args.sel_neg_margin)
+                        sel_loss = args.lambda_sel * sel
+                        sel_val = float(sel.detach())
+                        if step_stats is not None:
+                            step_stats["loss_terms/sel_intra"] = float(intra)
+                            step_stats["loss_terms/sel_inter"] = float(inter)
+                    # OpenCLIP backprops the full-set loss for EACH micro with NO /accum: the active slice
+                    # differs per micro, so summing over micros gives each slice its full-set gradient once.
+                    # CL, radial AND SEL are all GradCached on the full-768 set -> summed, NO /accum.
+                    loss = args.lambda_cl * cl + radial_loss + sel_loss
                 scaler.scale(loss).backward()
                 # log per-micro-normalised so the displayed loss ≈ cl + lambda_sel*sel: cl is the
                 # accum-summed full-set CE, so /accum here to match cl/sel; the BACKWARD'd loss above
@@ -827,7 +852,7 @@ def main():
                 run_loss += (cl.item() + args.lambda_radial * radial_val) / args.accum \
                     + args.lambda_sel * sel_val / args.accum
                 run_cl += cl.item() / args.accum
-                run_sel += sel_val
+                run_sel += sel_val / args.accum   # full-768 like cl -> same /accum display norm
                 run_radial += radial_val / args.accum   # full-768 like cl -> same /accum display norm
         else:
             # standard accumulation: CL negatives = micro_bs * world per micro-batch

@@ -765,12 +765,23 @@ def _edge_loss(
     pos_mask = valid & same
     neg_mask = valid & ~same
 
-    # grid: child in rows, parent in cols
-    p_grid = parent.unsqueeze(0).expand(B, -1, -1).reshape(B * B, -1)
-    c_grid = child.unsqueeze(1).expand(-1, B, -1).reshape(B * B, -1)
+    # Hinge over the B×B grid computed as [B,B] matrices (child in rows, parent in cols) via
+    # pairwise_oxy_angle — avoids materialising the [B²,D] expansion (~1.2GB/tensor at B=768), so
+    # SEL runs on the full GradCached batch without OOM. Numerically identical to the per-pair
+    # entailment_pos/entailment_neg on the reshaped grid (verified allclose).
+    #   angle[i,j] = oxy_angle(parent_j, child_i) = pairwise_oxy_angle(parent, child).T[i,j]
+    angle = L.pairwise_oxy_angle(parent, child, curv).transpose(0, 1)   # [child, parent]
+    ap_p = L.half_aperture(parent, curv, min_radius=r_min)              # [parent]
 
-    pos_all = entailment_pos(p_grid, c_grid, curv, r_min, tau, leak, lam_u,
-                             cone_margin).reshape(B, B)
+    # positive hinge = entailment_pos, broadcast: tau·ψ(parent) over cols, cone_margin·ψ(child) over rows
+    eff = angle - tau * ap_p.unsqueeze(0)
+    if cone_margin > 0.0:
+        eff = eff + cone_margin * L.half_aperture(child, curv, min_radius=r_min).unsqueeze(1)
+    pos_all = F.relu(eff)
+    if leak > 0.0:
+        pos_all = pos_all + leak * angle
+    if lam_u > 0.0:
+        pos_all = pos_all + lam_u * F.softplus(-torch.linalg.norm(parent, dim=-1)).unsqueeze(0)
     if pos_mask.any():
         pos_loss = pos_all[pos_mask].mean()
     else:
@@ -779,8 +790,10 @@ def _edge_loss(
 
     neg_loss = None
     if use_negatives and neg_mask.any():
-        neg_all = entailment_neg(p_grid, c_grid, curv, r_min, margin,
-                                 cone_margin=neg_cone_margin).reshape(B, B)
+        neg_eff = ap_p.unsqueeze(0) - angle + margin
+        if neg_cone_margin > 0.0:
+            neg_eff = neg_eff + neg_cone_margin * L.half_aperture(child, curv, min_radius=r_min).unsqueeze(1)
+        neg_all = F.relu(neg_eff)
         neg_loss = neg_all[neg_mask].mean()
         loss = 0.5 * (loss + neg_loss)
 
