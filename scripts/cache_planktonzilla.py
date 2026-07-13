@@ -21,9 +21,6 @@ import time
 
 from datasets import load_dataset
 
-REPO = "project-oceania/planktonzilla-17M"
-DEFAULT_OUT = os.environ.get("HP_CACHE", "/scratch/daniela/planktonzilla_cache/plankton")
-
 
 def _load_with_retry(num_proc: int, retries: int = 8, base_delay: float = 10.0):
     """`load_dataset` with retry+backoff. The ~91GB download over 187 shards regularly
