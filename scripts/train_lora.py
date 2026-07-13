@@ -58,10 +58,13 @@ from hyperbolic_plankton.train import TaxonomyCollator
 
 from final_eval import run_final_eval  # sibling script (scripts/ on path via torchrun)
 
-CACHE = "/scratch/daniela/planktonzilla_cache/plankton"
-CKPT_DIR = "/scratch/daniela/hyperbolic_plankton_ckpts"
-SPLIT_DIR = "/scratch/daniela/hyperbolic_plankton_splits"
-WANDB_DIR = "/scratch/daniela/wandb"  # keep wandb's local files off the repo/home
+# Data/output locations. Overridable by env var so a different machine (e.g. a cluster with
+# other mount points) needs only `export HP_CACHE=...` etc. — no per-cluster edit of this file.
+# Defaults are the original /scratch layout.
+CACHE = os.environ.get("HP_CACHE", "/scratch/daniela/planktonzilla_cache/plankton")
+CKPT_DIR = os.environ.get("HP_CKPT_DIR", "/scratch/daniela/hyperbolic_plankton_ckpts")
+SPLIT_DIR = os.environ.get("HP_SPLIT_DIR", "/scratch/daniela/hyperbolic_plankton_splits")
+WANDB_DIR = os.environ.get("HP_WANDB_DIR", "/scratch/daniela/wandb")  # keep wandb files off repo/home
 
 
 def _stratified_subsample(cache, idx, cap, seed):

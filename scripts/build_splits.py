@@ -18,8 +18,8 @@ from hyperbolic_plankton.eval import build_unseen_classes
 from hyperbolic_plankton.split import _RANK_COLS, stratified_split_seen
 from hyperbolic_plankton.data import _clean
 
-CACHE = "/scratch/daniela/planktonzilla_cache/plankton"
-SPLIT_DIR = "/scratch/daniela/hyperbolic_plankton_splits"
+CACHE = os.environ.get("HP_CACHE", "/scratch/daniela/planktonzilla_cache/plankton")
+SPLIT_DIR = os.environ.get("HP_SPLIT_DIR", "/scratch/daniela/hyperbolic_plankton_splits")
 
 
 def _full_strings_fast(ds):

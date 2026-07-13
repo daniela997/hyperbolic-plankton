@@ -21,7 +21,7 @@ import os
 from datasets import load_dataset
 
 REPO = "project-oceania/planktonzilla-17M"
-DEFAULT_OUT = "/scratch/daniela/planktonzilla_cache/plankton"
+DEFAULT_OUT = os.environ.get("HP_CACHE", "/scratch/daniela/planktonzilla_cache/plankton")
 
 
 def main() -> None:

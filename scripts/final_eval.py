@@ -24,8 +24,10 @@ from hyperbolic_plankton.eval import flatten_metrics, run_unseen_eval
 from hyperbolic_plankton.lora import apply_lora
 from hyperbolic_plankton.model import HyperbolicCLIP
 
-CACHE = "/scratch/daniela/planktonzilla_cache/plankton"
-SPLIT_DIR = "/scratch/daniela/hyperbolic_plankton_splits"
+# Env-overridable (see train_lora.py); train_lora imports run_final_eval, so these must
+# resolve the same way on the cluster or the end-of-training eval reads the wrong paths.
+CACHE = os.environ.get("HP_CACHE", "/scratch/daniela/planktonzilla_cache/plankton")
+SPLIT_DIR = os.environ.get("HP_SPLIT_DIR", "/scratch/daniela/hyperbolic_plankton_splits")
 BIOSCAN_HDF5 = os.environ.get(
     "BIOSCAN_HDF5",
     "/scratch/daniela/bioscan1m/data/BIOSCAN_1M/split_data/BioScan_data_in_splits.hdf5")

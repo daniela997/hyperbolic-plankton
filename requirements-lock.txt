@@ -1,0 +1,34 @@
+# Pinned environment for reproducing the `dino_plankton` env on another machine
+# (e.g. a disconnected cluster that rebuilds the Planktonzilla cache from HuggingFace).
+#
+# Python 3.12 (tested on 3.12.11).
+#
+# torch/torchvision are the CUDA 12.8 builds — install from the matching index, e.g.:
+#   pip install torch==2.10.0 torchvision==0.25.0 --index-url https://download.pytorch.org/whl/cu128
+# then `pip install -r requirements-lock.txt` for the rest. Match the cluster's CUDA/driver
+# (swap cu128 for the right tag if needed; keep the same package versions).
+#
+# WHY THE PINS MATTER for reproducibility:
+#   - datasets==2.21.0 and pyarrow==24.0.0 fix the row order of the `save_to_disk` cache.
+#     The split index files (*_idx.npy) are POSITIONAL into that cache, so a different
+#     datasets/pyarrow could reorder rows and silently scramble the seen/unseen split.
+#     Always rebuild cache + splits together on the cluster; verify build_splits.py prints
+#     "unseen classes: 220  unseen eval rows: 113,089" before training.
+#   - pyarrow>=24 is REQUIRED to read the planktonzilla-17M parquet shards.
+
+torch==2.10.0
+torchvision==0.25.0
+open_clip_torch==3.2.0
+datasets==2.21.0
+pyarrow==24.0.0
+transformers==5.6.2
+peft==0.19.1
+numpy==2.4.3
+pandas==2.2.3
+scikit-learn==1.8.0
+pillow==12.1.1
+huggingface-hub==1.13.0
+wandb==0.22.2
+safetensors==0.6.2
+tokenizers==0.22.2
+accelerate==1.10.1

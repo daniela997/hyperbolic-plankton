@@ -370,10 +370,18 @@ def hybrid_graded_loss(img, text_embs, taxonomy_batch, ranks, curv, scale,
             # matches the group representative's (rep = first image in the group). Build dense finer
             # ids once, take each prototype's rep-finer id, mask out same-finer images.
             finer_lab = [taxonomy_batch[finer][i] for i in keep]
-            finer_id = _dense_ids(finer_lab, img.device)        # [Nk]
+            finer_id = _dense_ids(finer_lab, img.device)        # [Nk]; None (truncated) -> -1
             first_idx = grp.float().argmax(dim=1)               # [U] first image index in each group
             rep_finer = finer_id[first_idx]                     # [U] rep's finer id per prototype
-            exclude = grp & (finer_id[None, :] == rep_finer[:, None])  # same-finer-as-rep -> drop
+            # Same-finer-as-rep -> drop (counted at that deeper tier). A truncated finer label
+            # (id -1) is a genuine LEAF at rank ℓ with no deeper tier, so it must NOT be excluded
+            # and must NOT collide with other truncated members via -1 == -1 (ragged-specific bug).
+            exclude = (
+                grp
+                & (finer_id[None, :] != -1)
+                & (rep_finer[:, None] != -1)
+                & (finer_id[None, :] == rep_finer[:, None])
+            )
             grp_excl = grp & ~exclude
             grp = torch.where(grp_excl.any(dim=1, keepdim=True), grp_excl, grp)  # fall back if all dropped
         # group-balanced T->I: per prototype, mean log-prob over its (masked) positive images

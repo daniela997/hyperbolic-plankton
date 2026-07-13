@@ -20,3 +20,9 @@ wandb/
 
 # OS
 .DS_Store
+
+# Analysis artifacts / docs — kept local, not pushed (logs, diag dumps, notebooks, design docs)
+notebooks/
+docs/
+*.png
+*.log
