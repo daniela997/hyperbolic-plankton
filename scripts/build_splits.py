@@ -38,6 +38,10 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--cache", default=CACHE)
     ap.add_argument("--split-dir", default=SPLIT_DIR)
+    ap.add_argument("--num-proc", type=int, default=16,
+                    help="parallel workers for the stratified split. Each worker copies a "
+                         "large Arrow slice, so lower this (e.g. 2-4) on a low-RAM pod to "
+                         "avoid OOM (exit 137).")
     args = ap.parse_args()
     SPLIT_DIR = args.split_dir
     os.makedirs(SPLIT_DIR, exist_ok=True)
@@ -72,7 +76,7 @@ def main():
 
     # ---- seen 60/20/20 stratified split (paper recipe) ----
     seen_ds = full.select(seen_global_idx.tolist())
-    tr, va, te = stratified_split_seen(seen_ds, seed=42, num_proc=16)
+    tr, va, te = stratified_split_seen(seen_ds, seed=42, num_proc=args.num_proc)
     print(f"seen split: train={len(tr):,} val={len(va):,} test={len(te):,}")
 
     for name, split in [("train", tr), ("val", va), ("test", te)]:
