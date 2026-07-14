@@ -326,7 +326,21 @@ def hybrid_graded_loss(img, text_embs, taxonomy_batch, ranks, curv, scale,
     are excluded here (counted at their own deeper tier), so coarse prototypes model the residual
     cross-finer-rank relatedness, not the species-mate mass. Per-tier temperature (coarser=hotter,
     RINCE schedule). Pass CUMULATIVE text_embs.
+
+    Cross-GPU: like plain CL (`accum_contrastive_loss_ddp`), the image/text banks and their
+    labels are all-gathered across ranks so each image contrasts against the WHOLE effective
+    batch's prototypes — not just the local rank's (which silently halved/quartered the negative
+    set on multi-GPU and depressed seen-species F1). Tensors use `_gather_local_loss` (non-diff
+    gather + local grad-splice; DDP all-reduce syncs the rest), label lists use `_gather_str`.
+    Both are no-ops off-DDP, so single-GPU behaviour is unchanged.
     """
+    img = _gather_local_loss(img)
+    text_embs = {
+        k: (_gather_local_loss(v) if isinstance(v, torch.Tensor) else v)
+        for k, v in text_embs.items()
+    }
+    taxonomy_batch = {k: _gather_str(list(v)) for k, v in taxonomy_batch.items()}
+
     levels = [r for r in ranks if r in text_embs]
     total = img.new_zeros(())
     n = 0
