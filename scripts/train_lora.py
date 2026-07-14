@@ -14,7 +14,12 @@ LoRA r=128 alpha=128 rslora on last 4 visual / last 8 text blocks (q,k,v,o).
 # BEFORE torch/NCCL init (NCCL reads the env var at process group creation).
 import os
 
-os.environ.setdefault("NCCL_P2P_DISABLE", "1")
+# NCCL peer-to-peer: default ENABLED (fast direct GPU-GPU collectives). Was hardcoded to
+# DISABLE for the local A5000 box (broken PCIe P2P there); cluster A6000 nodes have working
+# P2P, and disabling it routes collectives through host memory — slower, worse on 4 GPUs.
+# Override with `export NCCL_P2P_DISABLE=1` on hardware that needs the workaround (setdefault
+# respects an existing env value, so the export wins).
+os.environ.setdefault("NCCL_P2P_DISABLE", "0")
 
 import argparse
 import time
@@ -449,6 +454,11 @@ def main():
     ap.add_argument("--lora-r", "--lora_r", type=int, default=128,
                     help="LoRA rank. Underscore alias --lora_r accepted so wandb sweeps "
                          "(which emit the param key 'lora_r') work.")
+    ap.add_argument("--lora-alpha-match-scale", "--lora_alpha_match_scale", action="store_true",
+                    help="derive alpha=round(sqrt(32*r)) so the rsLoRA effective step alpha/sqrt(r) "
+                         "is held constant vs the r32/alpha32 base (r32->32, r64->45). Lets a sweep "
+                         "over lora_r ALONE be a clean capacity ablation (step size held). Ignored "
+                         "if --lora-alpha is given explicitly.")
     ap.add_argument("--lora-alpha", "--lora_alpha", type=int, default=None,
                     help="LoRA alpha (default: =r; underscore alias for wandb sweeps). With use_rslora the update scale is "
                          "alpha/sqrt(r), so to ADD CAPACITY (raise r) without changing the "
@@ -572,9 +582,19 @@ def main():
     model = HyperbolicCLIP(backbone=args.backbone, learn_curv=not args.freeze_curv,
                            use_proj=not args.no_proj)
     if not args.no_lora:
+        # alpha: explicit --lora-alpha wins; else --lora-alpha-match-scale derives it to hold the
+        # rsLoRA effective step (alpha/sqrt(r)) constant vs a base (r0=32,a0=32), i.e.
+        # alpha = a0*sqrt(r/r0) = sqrt(r0*r) [r32->32, r64->45] — so sweeping lora_r alone is a
+        # CLEAN capacity ablation (step size held); else the legacy default alpha=r.
+        if args.lora_alpha is not None:
+            lora_alpha = args.lora_alpha
+        elif args.lora_alpha_match_scale:
+            lora_alpha = round((32 * args.lora_r) ** 0.5)
+        else:
+            lora_alpha = args.lora_r
         model = apply_lora(
             model, r=args.lora_r,
-            alpha=args.lora_alpha if args.lora_alpha is not None else args.lora_r,
+            alpha=lora_alpha,
             adapt_visual_blocks=args.lora_visual_blocks,
             adapt_text_blocks=args.lora_text_blocks,
             reinit_final_ln=not args.no_reinit_final_ln,

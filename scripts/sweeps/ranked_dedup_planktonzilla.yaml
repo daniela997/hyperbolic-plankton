@@ -8,11 +8,13 @@
 # FIXED (not swept): euclidean, no-proj, ranked-dedup, 12+12 LoRA blocks, batch 2048
 # (micro-bs 512 x accum 1 x 4 GPUs — cross-GPU gather gives the full 2048 negatives; accum=1
 # = exact gradient, so NO --cache-accum-cl). 20 epochs. tau schedule at defaults (0.1/0.5).
-# SWEPT: lora_r, lora_alpha, lr, wd, scheduler {onecycle, warmupcos}.
+# SWEPT: lora_r {32,64}, lora_alpha {32,64} (INDEPENDENT), lr, wd, scheduler {onecycle,warmupcos}.
 #
-# NOTE on r/alpha: use_rslora scales the update by alpha/sqrt(r), so r and alpha jointly set
-# capacity AND effective step size — bayes explores the joint space (and lr on top). lr capped
-# at 3e-4: 4e-4 DIVERGED at batch 2048.
+# r/alpha are ablated SEPARATELY (4 combos). NOTE: with use_rslora the effective step is
+# alpha/sqrt(r), so r/alpha/lr jointly set the effective LR — bayes' lr sweep explores that, and
+# the independent dims expose r's and alpha's separate effects. Watch r64/alpha64: alpha=r at
+# r64 gives the largest step (per A7, that config diverged at higher lr) — the lr cap (3e-4,
+# below the 4e-4 that diverged at batch 2048) guards it, and a NaN trial just scores 0 in bayes.
 #
 # Metric: eval/seen/species_f1 (the headline rank the starvation hit). bayes search.
 #
@@ -32,9 +34,9 @@ metric:
 
 parameters:
   lora_r:
-    values: [16, 32, 64, 128]
+    values: [32, 64]
   lora_alpha:
-    values: [16, 32, 45, 64, 128]     # incl. 45 = r64 at matched rslora scale vs r32/alpha32
+    values: [32, 64]
   lr:
     distribution: log_uniform_values
     min: 5.0e-5
@@ -71,4 +73,4 @@ command:
   - --eval-epochs=1.0
   - --num-workers=8
   - --wandb-project=hyperbolic-plankton-sweep
-  - ${args}   # swept: lora_r, lora_alpha, lr, wd, scheduler
+  - ${args}   # swept: lora_r {32,64}, lora_alpha {32,64}, lr, wd, scheduler
