@@ -32,3 +32,4 @@ wandb==0.22.2
 safetensors==0.6.2
 tokenizers==0.22.2
 accelerate==1.10.1
+h5py==3.12.1
