@@ -449,8 +449,8 @@ def main():
     ap.add_argument("--lora-r", "--lora_r", type=int, default=128,
                     help="LoRA rank. Underscore alias --lora_r accepted so wandb sweeps "
                          "(which emit the param key 'lora_r') work.")
-    ap.add_argument("--lora-alpha", type=int, default=None,
-                    help="LoRA alpha (default: =r). With use_rslora the update scale is "
+    ap.add_argument("--lora-alpha", "--lora_alpha", type=int, default=None,
+                    help="LoRA alpha (default: =r; underscore alias for wandb sweeps). With use_rslora the update scale is "
                          "alpha/sqrt(r), so to ADD CAPACITY (raise r) without changing the "
                          "effective step size, raise alpha as alpha=alpha_old*sqrt(r/r_old) "
                          "(e.g. r 32->64 at matched scale: alpha 32->45). Tying alpha=r "

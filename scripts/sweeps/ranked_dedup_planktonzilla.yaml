@@ -1,0 +1,74 @@
+# ranked-dedup sweep on Planktonzilla (euclidean, no-proj) — 4x A6000 cluster pod.
+#
+# ranked-dedup = ragged-aware RINCE (full-bank depth-graded negatives + dedup + symmetric T->I),
+# the fix for hybrid's per-rank-keep species starvation (see hybrid-ragged-starvation memory).
+# Baselines @ step 2285, matched recipe: hybrid 0.07 < plain-RINCE 0.24 < plain-CL 0.37. This
+# sweep tunes ranked-dedup's RECIPE (not the loss's tau schedule — left at defaults 0.1/0.5).
+#
+# FIXED (not swept): euclidean, no-proj, ranked-dedup, 12+12 LoRA blocks, batch 2048
+# (micro-bs 512 x accum 1 x 4 GPUs — cross-GPU gather gives the full 2048 negatives; accum=1
+# = exact gradient, so NO --cache-accum-cl). 20 epochs. tau schedule at defaults (0.1/0.5).
+# SWEPT: lora_r, lora_alpha, lr, wd, scheduler {onecycle, warmupcos}.
+#
+# NOTE on r/alpha: use_rslora scales the update by alpha/sqrt(r), so r and alpha jointly set
+# capacity AND effective step size — bayes explores the joint space (and lr on top). lr capped
+# at 3e-4: 4e-4 DIVERGED at batch 2048.
+#
+# Metric: eval/seen/species_f1 (the headline rank the starvation hit). bayes search.
+#
+# CLUSTER USAGE (in the pod; venv at /root/hp-venv, cache staged at /root/pz_cache):
+#   cd /mnt/resources/hyperbolic-plankton && git pull --ff-only
+#   export HP_CACHE=/root/pz_cache HP_SPLIT_DIR=/mnt/indices/hyperbolic_plankton_splits \
+#          HP_CKPT_DIR=/mnt/resources/hyperbolic_plankton_ckpts HP_WANDB_DIR=/mnt/resources/wandb
+#   /root/hp-venv/bin/wandb sweep --project hyperbolic-plankton-sweep scripts/sweeps/ranked_dedup_planktonzilla.yaml
+#   # then run the agent it prints (each trial = one full 20-epoch 4-GPU run):
+#   /root/hp-venv/bin/wandb agent uofg/hyperbolic-plankton-sweep/<id>
+
+program: scripts/train_lora.py
+method: bayes
+metric:
+  name: eval/seen/species_f1
+  goal: maximize
+
+parameters:
+  lora_r:
+    values: [16, 32, 64, 128]
+  lora_alpha:
+    values: [16, 32, 45, 64, 128]     # incl. 45 = r64 at matched rslora scale vs r32/alpha32
+  lr:
+    distribution: log_uniform_values
+    min: 5.0e-5
+    max: 3.0e-4                        # cap below 4e-4 (diverged at batch 2048)
+  wd:
+    values: [1.0e-4, 1.0e-2, 2.0e-1]
+  scheduler:
+    values: [warmupcos, onecycle]
+
+command:
+  - ${env}
+  - /root/hp-venv/bin/torchrun
+  - --nproc_per_node=4
+  - --master_port=29573
+  - ${program}
+  - --dataset=planktonzilla
+  - --backbone=clip
+  - --geometry=euclidean
+  - --contrastive=ranked-dedup
+  - --rince-sim=distance
+  - --no-proj
+  - --epochs=20
+  - --micro-bs=512
+  - --accum=1
+  - --lora-visual-blocks=12
+  - --lora-text-blocks=12
+  - --warmup-frac=0.1
+  - --onecycle-pct-start=0.3
+  - --onecycle-min-lr=1e-6
+  - --lambda-cl=1.0
+  - --lambda-sel=0.0
+  - --seed=0
+  - --compile
+  - --eval-epochs=1.0
+  - --num-workers=8
+  - --wandb-project=hyperbolic-plankton-sweep
+  - ${args}   # swept: lora_r, lora_alpha, lr, wd, scheduler
