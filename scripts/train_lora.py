@@ -48,6 +48,7 @@ from hyperbolic_plankton.loss import (
     level_restricted_loss,
     radial_ordering_loss,
     ranked_contrastive_loss_ddp,
+    ranked_dedup_symmetric_loss_ddp,
     stable_lineage_ids,
     stacked_entailment_loss,
 )
@@ -276,12 +277,15 @@ def forward_loss(model, pixel_values, taxonomy_batch, lambda_sel, stats=None,
     # mis-treated as negatives — ~4.4% of pairs in clade-imbalanced plankton batches).
     img, deepest, class_ids, cum_embs = encode_cl_features(
         model, pixel_values, taxonomy_batch, ranks, cl_mask, geometry)
-    if contrastive == "ranked":
+    if contrastive in ("ranked", "ranked-dedup"):
         # RINCE: graded positives by taxonomic shared-depth (geometry-agnostic; works in eucl too).
         # rince_sim picks the similarity h(q,p): distance (-pairwise_dist) or angle (oxy_angle).
+        # ranked-dedup = ragged-aware: dedup bank to unique-lineage prototypes + symmetric T->I
+        # (fixes hybrid's per-rank-keep species starvation; RINCE grading, not LRCL restriction).
         lineage = stable_lineage_ids(taxonomy_batch, ranks, img.device)
         rkind = "euclidean" if euclidean else rince_sim
-        cl = ranked_contrastive_loss_ddp(
+        fn = ranked_dedup_symmetric_loss_ddp if contrastive == "ranked-dedup" else ranked_contrastive_loss_ddp
+        cl = fn(
             img, deepest, lineage, curv, scale, kind=rkind,
             max_depth=len(ranks), min_tau=rince_min_tau, max_tau=rince_max_tau)
     elif contrastive == "level-restricted":
@@ -384,7 +388,7 @@ def main():
                          "baseline (open_clip ClipLoss, cosine; no SEL/lift). The Euclidean-LoRA "
                          "baseline isolates LoRA-vs-full-FT from hyperbolic-vs-Euclidean.")
     ap.add_argument("--contrastive", default="distance",
-                    choices=["distance", "angle", "ranked", "level-restricted", "hybrid"],
+                    choices=["distance", "angle", "ranked", "ranked-dedup", "level-restricted", "hybrid"],
                     help="distance=MERU InfoNCE on -pairwise_dist; angle=ATMG exterior-angle "
                          "InfoNCE; ranked=RINCE (Hoffmann 2022) graded-by-taxonomic-depth positives; "
                          "level-restricted=LRCL (Tao 2026) per-level unique-label InfoNCE; "
@@ -734,7 +738,7 @@ def main():
             kind = args.geometry if args.geometry == "euclidean" else args.contrastive
             # ranked CL needs per-micro lineage ids ([B,R]) for the full local set
             cache_lin = ([stable_lineage_ids(tb, ranks, device) for _, tb in micros]
-                         if args.contrastive == "ranked" else None)
+                         if args.contrastive in ("ranked", "ranked-dedup") else None)
             # GradCache is LOSS-AGNOSTIC: any enabled loss runs on the full spliced batch. SEL needs the
             # per-rank cumulative text (like LRCL/hybrid), so cache cum_embs (c[3]) when SEL is on too.
             sel_on = args.geometry != "euclidean" and args.lambda_sel > 0
@@ -797,9 +801,11 @@ def main():
                                                        use_centroid=args.radial_centroid)
                             radial_loss = args.lambda_radial * rad
                             radial_val = float(rad.detach())
-                    elif args.contrastive == "ranked":
+                    elif args.contrastive in ("ranked", "ranked-dedup"):
                         local_lin = torch.cat(cache_lin)  # [accum*mb, R]; fresh-vs-cached identical ids
-                        cl = ranked_contrastive_loss_ddp(
+                        rfn = (ranked_dedup_symmetric_loss_ddp
+                               if args.contrastive == "ranked-dedup" else ranked_contrastive_loss_ddp)
+                        cl = rfn(
                             local_i, local_t, local_lin, core.curvature, core.logit_scale.exp(),
                             kind=("euclidean" if args.geometry == "euclidean" else args.rince_sim),
                             max_depth=len(ranks),

@@ -172,6 +172,66 @@ def ranked_contrastive_loss_ddp(
     return ranked_infonce(sim, depth, max_depth=max_depth, min_tau=min_tau, max_tau=max_tau)
 
 
+def ranked_dedup_symmetric_loss_ddp(
+    img, text, lineage_ids, curv, scale, kind="distance",
+    max_depth=4, min_tau=0.1, max_tau=0.5,
+):
+    """Ragged-aware RINCE: full-bank depth-graded negatives + DEDUP-to-prototypes + SYMMETRIC T->I.
+
+    Fixes the per-rank `keep` starvation of `hybrid_graded_loss`/`level_restricted_loss` on ragged
+    data (see hybrid-ragged-starvation memory): those contrast a rank-ℓ query only against rank-ℓ
+    valid images, so on Planktonzilla the species contrast is ~47 imgs vs ~23 protos. Here EVERY
+    image is anchored at its deepest text and graded against the WHOLE deduped bank by shared depth
+    (RINCE-in), so a species query keeps the full bank as graded negatives (coarser-only images are
+    depth-<max negatives, not excluded). This is RINCE's grading, NOT LRCL's level-restriction
+    (which causes the starvation). LRCL's contributions kept: dedup-to-prototypes + symmetric T->I.
+
+    `img`/`text` [B,D] = this rank's images / deepest-text. `lineage_ids` [B,R] = per-rank STABLE
+    ids (coarse->fine, -1 = unknown). Bank = gathered texts, deduped to unique full lineages so
+    same-lineage duplicates don't split the depth-`max` softmax mass. Symmetric: I->T (image queries
+    vs prototype bank) + T->I (prototype queries vs image bank), each `ranked_infonce`, averaged.
+    """
+    import torch.distributed as dist
+    ddp = dist.is_available() and dist.is_initialized() and dist.get_world_size() > 1
+    if ddp:
+        all_img = _gather_local_loss(img)                      # [B*world, D]; local slice keeps grad
+        all_text = _gather_local_loss(text)
+        all_lin = _gather_int_rows(lineage_ids)                # [B*world, R], non-diff
+    else:
+        all_img, all_text, all_lin = img, text, lineage_ids
+
+    # DEDUP the bank to unique full-lineage prototypes. torch.unique(dim=0) on the [N,R] lineage
+    # rows gives an inverse map; take the FIRST bank row per unique lineage as its prototype text.
+    # (Unknown -1 ranks are part of the key, so a genus-leaf and a species-deep of the same genus
+    # are DIFFERENT prototypes — correct: they are different classes.)
+    uniq_lin, inverse = torch.unique(all_lin, dim=0, return_inverse=True)   # [P,R], [N]
+    P = uniq_lin.shape[0]
+    first_row = torch.full((P,), -1, dtype=torch.long, device=all_text.device)
+    order = torch.arange(inverse.shape[0], device=all_text.device)
+    # scatter_reduce 'amin' -> first (smallest) bank index per prototype
+    first_row.scatter_reduce_(0, inverse, order, reduce="amin", include_self=False)
+    proto_text = all_text[first_row]                           # [P, D]
+    proto_lin = uniq_lin                                       # [P, R]
+
+    # I->T: image queries (local, grad-carrying) vs deduped prototype bank, graded by shared depth.
+    sim_i2t, _ = _cl_logits(kind, img, text, img, proto_text, curv, scale)   # [B, P]
+    if kind == "angle":
+        sim_i2t = -sim_i2t
+    depth_i2t = shared_depth_matrix(lineage_ids, proto_lin)    # [B, P]
+    i2t = ranked_infonce(sim_i2t, depth_i2t, max_depth=max_depth, min_tau=min_tau, max_tau=max_tau)
+
+    # T->I: prototype queries vs the FULL gathered image bank, graded by shared depth (symmetric).
+    # proto_text has grad only through prototypes whose first_row is a LOCAL image; that's the
+    # OpenCLIP local-loss splice (DDP all-reduce syncs the rest), consistent with I->T.
+    sim_t2i, _ = _cl_logits(kind, proto_text, proto_text, proto_text, all_img, curv, scale)  # [P, N]
+    if kind == "angle":
+        sim_t2i = -sim_t2i
+    depth_t2i = shared_depth_matrix(proto_lin, all_lin)        # [P, N]
+    t2i = ranked_infonce(sim_t2i, depth_t2i, max_depth=max_depth, min_tau=min_tau, max_tau=max_tau)
+
+    return 0.5 * (i2t + t2i)
+
+
 def _gather_int_rows(t: torch.Tensor) -> torch.Tensor:
     """Non-differentiable all-gather of an int tensor [B, R] -> [B*world, R]. Returns input off-DDP."""
     import torch.distributed as dist

@@ -390,3 +390,65 @@ def test_sel_backward_finite_with_ragged_missing_ranks():
     for r in ranks:
         assert torch.isfinite(embs[r].grad).all(), f"NaN/Inf grad in {r}"
     assert torch.isfinite(img.grad).all()
+
+
+# --------------------------------------------------------------------------------
+# ranked_dedup_symmetric_loss_ddp — ragged-aware RINCE (dedup + symmetric T->I)
+# Guards the fix for hybrid's per-rank-keep species starvation on ragged data.
+# --------------------------------------------------------------------------------
+
+def _ragged_batch(B=64, R=7, D=8, seed=0):
+    """Hand-built ragged batch: images assigned to lineages truncated at varying depths, so the
+    deep ranks are sparse (mimics Planktonzilla). Returns (img, deepest_text, lineage_ids)."""
+    g = torch.Generator().manual_seed(seed)
+    lin = torch.full((B, R), -1, dtype=torch.long)
+    for i in range(B):
+        # depth 1..R, weighted toward shallow (few reach the deepest rank)
+        depth = 1 + int(torch.randint(0, R, (1,), generator=g).item())
+        for r in range(depth):
+            # small vocab per rank so lineages share prefixes (real prototypes form)
+            lin[i, r] = int(torch.randint(0, max(2, r + 2), (1,), generator=g).item())
+    img = torch.randn(B, D, generator=g)
+    text = torch.randn(B, D, generator=g)   # stand-in for per-image deepest text
+    return img, text, lin
+
+
+def test_ranked_dedup_symmetric_runs_and_fixes_starvation():
+    img, text, lin = _ragged_batch()
+    img = img.clone().requires_grad_(True)
+    loss = Lo.ranked_dedup_symmetric_loss_ddp(
+        img, text, lin, curv=CURV, scale=10.0, kind="euclidean", max_depth=lin.shape[1]
+    )
+    assert torch.isfinite(loss), "loss not finite"
+    loss.backward()
+    assert torch.isfinite(img.grad).all() and (img.grad.abs() > 0).any(), "no gradient"
+
+    # dedup: bank collapses to unique lineages
+    uniq = torch.unique(lin, dim=0)
+    assert uniq.shape[0] < lin.shape[0], "expected duplicate lineages to dedup"
+
+    # STARVATION FIX: a deepest-rank query must see MANY graded negatives (not just its own tier).
+    depth = Lo.shared_depth_matrix(lin, uniq)          # [B, P]
+    R = lin.shape[1]
+    full = (lin != -1).sum(dim=1)                       # per-image lineage depth
+    deep_q = int((full == R).nonzero()[0]) if (full == R).any() else int(full.argmax())
+    row = depth[deep_q]
+    negatives = int((row < row.max()).sum())            # prototypes it is NOT identical to
+    assert negatives > 1, "deep query should see multiple graded negatives (starvation fixed)"
+
+
+def test_ranked_dedup_symmetric_complete_data():
+    """Complete-to-species data (all ranks valid): every image has a full-depth prototype, no
+    keep-fragmentation, loss finite. (BIOSCAN-like regression guard.)"""
+    B, R, D = 48, 4, 8
+    g = torch.Generator().manual_seed(1)
+    n_species = 8
+    sp = torch.randint(0, n_species, (B,), generator=g)
+    lin = torch.stack([sp // 4, sp // 2, sp, sp], dim=1).long()  # nested, all valid
+    img = torch.randn(B, D, generator=g).requires_grad_(True)
+    text = torch.randn(B, D, generator=g)
+    loss = Lo.ranked_dedup_symmetric_loss_ddp(img, text, lin, curv=CURV, scale=10.0,
+                                              kind="euclidean", max_depth=R)
+    assert torch.isfinite(loss)
+    loss.backward()
+    assert torch.isfinite(img.grad).all()
