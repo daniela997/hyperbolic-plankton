@@ -61,11 +61,20 @@ def stratified_split_seen(
     seen_ds = seen_ds.cast_column("full", ClassLabel(names=global_names))
 
     train_parts, val_parts, test_parts = [], [], []
-    dataset_names = sorted(set(seen_ds["dataset"]))
+
+    # Group row indices by source in a SINGLE pass over the `dataset` column, instead of an
+    # O(#sources) sweep of `.filter(num_proc=...)` (each call re-scanned all 2.9M rows and
+    # spawned workers → 100% CPU, no progress on large data). `.select(idx)` per source is a
+    # cheap index gather. Order preserved so the per-source split stays reproducible.
+    all_dsets = seen_ds["dataset"]  # materialise once (plain list)
+    idx_by_source: dict[str, list[int]] = {}
+    for i, dname in enumerate(all_dsets):
+        idx_by_source.setdefault(dname, []).append(i)
+    dataset_names = sorted(idx_by_source)
 
     for dname in dataset_names:
-        sub = seen_ds.filter(lambda b: [d == dname for d in b["dataset"]], batched=True, num_proc=num_proc)
-        labels = sub["full"]  # now integer class ids (global encoding), like their `label`
+        sub = seen_ds.select(idx_by_source[dname])
+        labels = list(sub["full"])  # materialise as plain list -> O(1) indexing in the loops below
         counts = Counter(labels)
         singletons = {k for k, v in counts.items() if v == 1}
 
