@@ -32,6 +32,16 @@ metric:
   name: eval/seen/species_f1
   goal: maximize
 
+# Hyperband early-termination: kill underperforming trials early so a wider lr range is cheap
+# (bad lr / diverged configs die at the first bracket instead of running 20 epochs). min_iter=3
+# = first check after 3 logged metric points (=3 epochs, since --eval-epochs 1.0); brackets at
+# 3, 9, ... (eta 3). A diverged trial (NaN) also self-aborts via train_lora's divergence guard,
+# logging species_f1=0 -> culled here too.
+early_terminate:
+  type: hyperband
+  min_iter: 3
+  eta: 3
+
 parameters:
   lora_r:
     values: [32, 64]
@@ -40,7 +50,9 @@ parameters:
   lr:
     distribution: log_uniform_values
     min: 5.0e-5
-    max: 3.0e-4                        # cap below 4e-4 (diverged at batch 2048)
+    max: 6.0e-4                        # widened: the 4e-4 divergence was on the OLD/wrong loss
+                                       # path; ranked-dedup may tolerate higher, and the NaN guard
+                                       # + hyperband cull diverged/underperforming trials cheaply.
   wd:
     values: [1.0e-4, 1.0e-2, 2.0e-1]
   scheduler:

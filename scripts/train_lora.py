@@ -932,6 +932,24 @@ def main():
             log(f"it {it:>6}/{total_iters} | loss {avg_loss:.4f} cl {avg_cl:.4f} "
                 f"sel {avg_sel:.4f} {rad_str}| lr {lr:.2e} | curv {model.curvature.item():.3f} | "
                 f"{ips:.0f} img/s")
+            # Divergence guard: a non-finite loss means the run has blown up (e.g. too-high LR).
+            # Abort cleanly on ALL ranks (collective, else the others hang) so a sweep trial ends
+            # instead of burning epochs on NaN. Log a 0 metric first so bayes scores it as bad.
+            diverged = torch.tensor(
+                0.0 if (avg_loss == avg_loss and abs(avg_loss) != float("inf")) else 1.0,
+                device=device,
+            )
+            if ddp:
+                dist.all_reduce(diverged, op=dist.ReduceOp.MAX)  # any rank diverged -> all stop
+            if diverged.item() > 0:
+                log(f"DIVERGED (non-finite loss) at it {it} — aborting run (metric logged as 0).")
+                if wb is not None:
+                    wb.log({"eval/seen/species_f1": 0.0, "diverged": 1}, step=it)
+                    wb.summary["eval/seen/species_f1"] = 0.0
+                    wb.finish(exit_code=1)
+                if ddp:
+                    dist.destroy_process_group()
+                return
             if wb is not None:
                 payload = {
                     "train/loss": avg_loss, "train/cl": avg_cl, "train/sel": avg_sel,
