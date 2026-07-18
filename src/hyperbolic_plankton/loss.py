@@ -535,14 +535,26 @@ def stable_lineage_ids(taxonomy_batch, ranks, device):
 
 def shared_depth_matrix(query_lineages, bank_lineages):
     """[Q, K] int matrix: number of LEADING ranks shared between query i and bank j (taxonomy
-    order->...->species). 4 = same species, 0 = shares nothing. `*_lineages` are [N, R] LongTensors
-    of per-rank dense ids (rank order coarse->fine); -1 (unknown) never matches (treated distinct)."""
+    order->...->species). R = SAME CLASS, 0 = shares nothing. `*_lineages` are [N, R] LongTensors
+    of per-rank dense ids (rank order coarse->fine); -1 (unknown) never matches (treated distinct).
+
+    RAGGED FIX: an -1 (truncated) rank never equals another -1, so on ragged data a truncated
+    lineage would never self-match at full depth — e.g. a genus-deep query [k,p,c,o,f,g,-1] scored
+    only 6 against its OWN class. In `ranked_infonce` (positives = {depth == d}) that means the
+    query's own class is pooled at a coarser level TOGETHER WITH ITS RELATIVES that share the same
+    valid prefix, so the loss never pulls the query toward its own class specifically — wrecking
+    fine-grained (species) discrimination on ragged data. So: EXACT lineage equality (identical
+    rows, including matching -1 truncation) is forced to full depth R, making a query's own class
+    always its strongest positive. Complete lineages are unaffected (they already scored R)."""
     q = query_lineages[:, None, :]            # [Q,1,R]
     k = bank_lineages[None, :, :]             # [1,K,R]
     eq = (q == k) & (q != -1)                 # [Q,K,R] per-rank equality, unknowns never equal
     # cumulative AND from the coarsest rank: depth = #leading ranks that all match
     cum = torch.cumprod(eq.long(), dim=2)     # stays 1 only while every prior rank matched
-    return cum.sum(dim=2)                     # [Q,K] in 0..R
+    depth = cum.sum(dim=2)                    # [Q,K] in 0..R
+    # exact same lineage (incl. identical truncation) -> full depth (same class)
+    same_class = (q == k).all(dim=2)          # [Q,K]; -1 positions must match too
+    return torch.where(same_class, torch.full_like(depth, query_lineages.shape[1]), depth)
 
 
 def ranked_infonce(sim, depth, max_depth, min_tau=0.1, max_tau=0.5, one_per_rank=True, eps=1e-7):

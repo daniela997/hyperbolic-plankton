@@ -452,3 +452,24 @@ def test_ranked_dedup_symmetric_complete_data():
     assert torch.isfinite(loss)
     loss.backward()
     assert torch.isfinite(img.grad).all()
+
+
+def test_shared_depth_exact_lineage_is_full_depth_ragged():
+    """RAGGED FIX: a truncated lineage must self-match at FULL depth, else its own class gets
+    pooled with relatives at a coarser level in ranked_infonce (positives = {depth == d}) and the
+    loss never pulls a query toward its own class — which wrecked species discrimination."""
+    R = 7
+    lins = torch.tensor([
+        [1, 2, 3, 4, 5, 6, 7],        # species-deep
+        [1, 2, 3, 4, 5, 9, -1],       # genus-deep (truncated)
+        [1, 2, 3, 9, -1, -1, -1],     # order-deep (truncated)
+    ])
+    d = Lo.shared_depth_matrix(lins, lins)
+    assert (torch.diag(d) == R).all(), f"self-match must be full depth, got {torch.diag(d).tolist()}"
+
+    # ...but DIFFERENT classes must still be graded by shared prefix, not merged to full depth.
+    q = torch.tensor([[1, 2, 3, 4, 5, 9, -1]])          # genus-deep
+    other_genus = torch.tensor([[1, 2, 3, 4, 5, 8, -1]])  # different genus, same family
+    deeper_same_genus = torch.tensor([[1, 2, 3, 4, 5, 9, 7]])  # species-deep in that genus
+    assert int(Lo.shared_depth_matrix(q, other_genus)[0, 0]) == 5
+    assert int(Lo.shared_depth_matrix(q, deeper_same_genus)[0, 0]) == 6
