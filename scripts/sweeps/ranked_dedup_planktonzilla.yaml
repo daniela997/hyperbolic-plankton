@@ -8,13 +8,14 @@
 # FIXED (not swept): euclidean, no-proj, ranked-dedup, 12+12 LoRA blocks, batch 2048
 # (micro-bs 512 x accum 1 x 4 GPUs — cross-GPU gather gives the full 2048 negatives; accum=1
 # = exact gradient, so NO --cache-accum-cl). 20 epochs. tau schedule at defaults (0.1/0.5).
-# SWEPT: lora_r {32,64}, lora_alpha {32,64} (INDEPENDENT), lr, wd, scheduler {onecycle,warmupcos}.
+# SWEPT: lora_r {32,64}, lora_alpha {32,64} (INDEPENDENT), lr 5e-5..2.5e-4, wd {1e-4,1e-2},
+# scheduler {onecycle,warmupcos}. Ranges NARROWED from sweep evidence (see per-param comments).
 #
-# r/alpha are ablated SEPARATELY (4 combos). NOTE: with use_rslora the effective step is
-# alpha/sqrt(r), so r/alpha/lr jointly set the effective LR — bayes' lr sweep explores that, and
-# the independent dims expose r's and alpha's separate effects. Watch r64/alpha64: alpha=r at
-# r64 gives the largest step (per A7, that config diverged at higher lr) — the lr cap (3e-4,
-# below the 4e-4 that diverged at batch 2048) guards it, and a NaN trial just scores 0 in bayes.
+# NOTE: this config is for the FIXED loss (commit 5a3abbc, ragged self-match). Earlier sweeps
+# (wtry69nf, and pby8uffs' first trials) tuned a broken objective where truncated lineages never
+# self-matched at full depth — their rankings are not reliable guides. The one post-fix finished
+# trial: lr 9.97e-05, r32, a64, warmupcos, wd 1e-4 -> periodic 0.6965 / FULL-SPLIT test 0.6081
+# (vs pre-fix best 0.530, E0c plain-CL 0.634, full-FT 0.818).
 #
 # Metric: eval/seen/species_f1 (the headline rank the starvation hit). bayes search.
 #
@@ -32,14 +33,14 @@ metric:
   name: eval/seen/species_f1
   goal: maximize
 
-# Hyperband early-termination: kill underperforming trials early so a wider lr range is cheap
-# (bad lr / diverged configs die at the first bracket instead of running 20 epochs). min_iter=3
-# = first check after 3 logged metric points (=3 epochs, since --eval-epochs 1.0); brackets at
-# 3, 9, ... (eta 3). A diverged trial (NaN) also self-aborts via train_lora's divergence guard,
-# logging species_f1=0 -> culled here too.
+# Hyperband early-termination. min_iter RAISED 3->5: at min_iter=3 only 1 of 6 trials survived
+# (sweep pby8uffs), which is too aggressive — and the ragged-depth fix changed the loss's learning
+# dynamics, so epoch-3 rankings are less predictive than they were. 5 epochs gives trials a fairer
+# shot while still culling clear losers early. Brackets at 5, 15 (eta 3). A diverged trial (NaN)
+# self-aborts via train_lora's divergence guard, logging species_f1=0 -> culled here too.
 early_terminate:
   type: hyperband
-  min_iter: 3
+  min_iter: 5
   eta: 3
 
 parameters:
@@ -47,16 +48,21 @@ parameters:
     values: [32, 64]
   lora_alpha:
     values: [32, 64]
+  # lr NARROWED to 5e-5..2.5e-4 from evidence: the post-fix winner is 9.97e-05 (test 0.608), and
+  # pre-fix everything >=3.7e-4 collapsed (0.45/0.41/0.23) while the whole top-6 sat in
+  # 6.6e-5..2.0e-4. No trial above 2.5e-4 has ever finished well, so stop spending trials there.
   lr:
     distribution: log_uniform_values
     min: 5.0e-5
-    max: 6.0e-4                        # widened: the 4e-4 divergence was on the OLD/wrong loss
-                                       # path; ranked-dedup may tolerate higher, and the NaN guard
-                                       # + hyperband cull diverged/underperforming trials cheaply.
+    max: 2.5e-4
+  # wd 0.2 DROPPED: both post-fix trials with wd=0.2 were culled (0.398, 0.368) and it was weak
+  # pre-fix too. Keep the two that produce winners.
   wd:
-    values: [1.0e-4, 1.0e-2, 2.0e-1]
+    values: [1.0e-4, 1.0e-2]
   scheduler:
-    values: [warmupcos, onecycle]
+    values: [warmupcos, onecycle]      # keep both: warmupcos is the only post-fix survivor and
+                                       # took 4 of the pre-fix top-6, but 1 survivor is thin
+                                       # evidence — let bayes confirm rather than pre-decide.
 
 command:
   - ${env}
