@@ -8,14 +8,20 @@
 # FIXED (not swept): euclidean, no-proj, ranked-dedup, 12+12 LoRA blocks, batch 2048
 # (micro-bs 512 x accum 1 x 4 GPUs — cross-GPU gather gives the full 2048 negatives; accum=1
 # = exact gradient, so NO --cache-accum-cl). 20 epochs. tau schedule at defaults (0.1/0.5).
-# SWEPT: lora_r {32,64}, lora_alpha {32,64} (INDEPENDENT), lr 5e-5..2.5e-4, wd {1e-4,1e-2},
-# scheduler {onecycle,warmupcos}. Ranges NARROWED from sweep evidence (see per-param comments).
+# SWEPT: lr 5e-5..2.5e-4, wd {1e-4,1e-2,2e-1}, scheduler {onecycle,warmupcos}.
+# PINNED: lora_r=32, lora_alpha=32 — matched to the E0c plain-CL baseline so the comparison
+# isolates the LOSS, not capacity (see the lora_r comment below).
 #
 # NOTE: this config is for the FIXED loss (commit 5a3abbc, ragged self-match). Earlier sweeps
-# (wtry69nf, and pby8uffs' first trials) tuned a broken objective where truncated lineages never
-# self-matched at full depth — their rankings are not reliable guides. The one post-fix finished
-# trial: lr 9.97e-05, r32, a64, warmupcos, wd 1e-4 -> periodic 0.6965 / FULL-SPLIT test 0.6081
-# (vs pre-fix best 0.530, E0c plain-CL 0.634, full-FT 0.818).
+# tuned a broken objective where truncated lineages never self-matched at full depth — their
+# rankings are not reliable guides.
+#
+# THE COMPARISON: E0c plain-CL baseline (run 0o1s0wpx) = r32/alpha32(default)/wd0.2/lr1e-4/
+# warmupcos/batch768 -> FULL-SPLIT test/seen/species_f1 0.634. Best ranked-dedup so far
+# (r6h04z4f/1lsy24y1, r64/a64/wd1e-4/lr5.03e-5/batch2048) = 0.6245 — but that run had 2x the
+# capacity and a larger rsLoRA step, so the -0.01 gap was NOT attributable to the loss. With
+# capacity pinned here, a win/loss vs 0.634 is a statement about ranked-dedup itself.
+# CAVEAT still open: batch differs (this sweep runs 2048 via 512x1x4 GPUs vs E0c's 768).
 #
 # Metric: eval/seen/species_f1 (the headline rank the starvation hit). bayes search.
 #
@@ -44,21 +50,29 @@ early_terminate:
   eta: 3
 
 parameters:
+  # CAPACITY PINNED to the E0c baseline (r=32; E0c passed lora_alpha=None -> alpha defaults to
+  # r=32). Capacity is the STRUCTURAL knob — it changes model expressiveness, so leaving it free
+  # made the ranked-dedup-vs-E0c comparison unattributable (the 0.6245 run used r64/a64, i.e. 2x
+  # capacity AND a 41% larger rsLoRA step, alpha/sqrt(r) = 8.0 vs E0c's 5.66). Pinning it to E0c's
+  # value isolates the LOSS. lr/wd/scheduler stay swept: those are optimizer settings a different
+  # loss may legitimately want tuned differently.
   lora_r:
-    values: [32, 64]
+    values: [32]
   lora_alpha:
-    values: [32, 64]
+    values: [32]
   # lr NARROWED to 5e-5..2.5e-4 from evidence: the post-fix winner is 9.97e-05 (test 0.608), and
   # pre-fix everything >=3.7e-4 collapsed (0.45/0.41/0.23) while the whole top-6 sat in
   # 6.6e-5..2.0e-4. No trial above 2.5e-4 has ever finished well, so stop spending trials there.
+  # (E0c's own lr was 1e-4 — inside this range.)
   lr:
     distribution: log_uniform_values
     min: 5.0e-5
     max: 2.5e-4
-  # wd 0.2 DROPPED: both post-fix trials with wd=0.2 were culled (0.398, 0.368) and it was weak
-  # pre-fix too. Keep the two that produce winners.
+  # wd 0.2 RE-ADDED (it is E0c's value): it scored poorly for ranked-dedup before, but with
+  # capacity now pinned to the baseline we want to know whether ranked-dedup can win at the
+  # baseline's own wd, not just at its preferred one. Keep the two that produced winners too.
   wd:
-    values: [1.0e-4, 1.0e-2]
+    values: [1.0e-4, 1.0e-2, 2.0e-1]
   scheduler:
     values: [warmupcos, onecycle]      # keep both: warmupcos is the only post-fix survivor and
                                        # took 4 of the pre-fix top-6, but 1 survivor is thin
@@ -91,4 +105,4 @@ command:
   - --eval-epochs=1.0
   - --num-workers=8
   - --wandb-project=hyperbolic-plankton-sweep
-  - ${args}   # swept: lora_r {32,64}, lora_alpha {32,64}, lr, wd, scheduler
+  - ${args}   # swept: lr, wd, scheduler (lora_r/alpha PINNED to 32 = E0c baseline capacity)
