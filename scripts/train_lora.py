@@ -514,6 +514,16 @@ def main():
     ap.add_argument("--eval-cap", type=int, default=50,
                     help="periodic eval: max rows per proposed_label class (stratified "
                          "subsample, so macro-F1 tracks the full-split value with low variance)")
+    ap.add_argument("--early-stop-patience", "--early_stop_patience", type=int, default=0,
+                    help="stop if eval/seen/species_f1 hasn't improved by >--early-stop-min-delta "
+                         "for this many consecutive evals (0=off). Per-trial plateau stop, judged "
+                         "on the run's OWN trajectory — a still-climbing run resets the counter "
+                         "and never stops (unlike hyperband, which killed climbers for lagging "
+                         "peers at a fixed step). On stop, the run still does its final test eval.")
+    ap.add_argument("--early-stop-min-delta", "--early_stop_min_delta", type=float, default=0.002,
+                    help="min eval/seen/species_f1 gain that counts as improvement for "
+                         "--early-stop-patience. Default 0.002 (< the ~0.02/epoch late climb, so "
+                         "genuine progress never trips it; only a true plateau does).")
     ap.add_argument("--tag", default="bioclip_lora")
     ap.add_argument("--wandb-project", default="hyperbolic-plankton")
     ap.add_argument("--no-wandb", action="store_true")
@@ -725,6 +735,12 @@ def main():
     t0 = time.perf_counter()
     run_cl = run_sel = run_loss = run_radial = 0.0
     best_unseen = -1.0  # track best periodic unseen mean-F1 -> save _best.pt (peak often mid-run)
+    # Plateau early-stop state: track the sweep's objective (eval/seen/species_f1) and stop when
+    # it hasn't improved by >min_delta for `patience` consecutive evals. Judges each run on ITS
+    # OWN trajectory, so a still-climbing run (which resets the counter every eval) is never
+    # stopped — unlike hyperband, which killed climbers for being behind PEERS at a fixed step.
+    es_best = -1.0
+    es_stale = 0
     data_iter = iter(loader)
     epoch = 0
     sel_terms: dict = {}  # last-micro-step SEL decomposition, refreshed before each log
@@ -989,6 +1005,27 @@ def main():
                     torch.save({"model": trainable_state_dict(model), "it": it,
                                 "args": vars(args), "unseen_mean_f1": cur}, path)
                     log(f"  ↑ best unseen mean-F1 {cur:.4f} -> saved {path}")
+
+            # ---- plateau early-stop (rank 0 decides on eval/seen/species_f1, then all ranks
+            # exit together — a lone rank-0 return would deadlock the others on the next collective)
+            stop = torch.zeros((), device=device)
+            if is_main() and args.early_stop_patience > 0:
+                obj = metrics.get("eval/seen/species_f1", 0.0)
+                if obj > es_best + args.early_stop_min_delta:
+                    es_best = obj
+                    es_stale = 0
+                else:
+                    es_stale += 1
+                    if es_stale >= args.early_stop_patience:
+                        stop = torch.ones((), device=device)
+                        log(f"  EARLY STOP: eval/seen/species_f1 not improved by "
+                            f">{args.early_stop_min_delta} for {es_stale} evals "
+                            f"(best {es_best:.4f}). Stopping at it {it}.")
+            if ddp:
+                dist.all_reduce(stop, op=dist.ReduceOp.MAX)  # rank-0's decision -> all ranks
+            if stop.item() > 0:
+                break  # leave the training loop -> falls through to final eval + save
+
             if ddp:
                 dist.barrier()
             t0 = time.perf_counter()  # don't count eval time in img/s

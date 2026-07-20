@@ -39,23 +39,12 @@ metric:
   name: eval/seen/species_f1
   goal: maximize
 
-# Hyperband early-termination: ONE cull, early. min_iter=7/eta=3 puts brackets at 7 and 21 —
-# and since runs are 20 epochs, the 21 bracket NEVER FIRES. So a trial is judged once (epoch 7)
-# and, if it survives, runs to completion undisturbed.
-#
-# Why: at min_iter=5/eta=3 the brackets were 5 and 15, and the epoch-15 cull killed f59oyyzv at
-# 75% done — it was only 0.023 behind the leaders and climbing steeply (+0.023 in its last epoch,
-# while the leader was flattening), so it plausibly would have finished competitive. Hyperband
-# ranks on LEVEL, not slope, so late climbers with a higher lr get punished. And culling at 15
-# saves only 5 of 20 epochs anyway — tiny savings for a real risk. Culling at 7 saves 13 epochs
-# per bad trial (the savings that actually matter) and leaves the late race alone.
-#
-# A diverged trial (NaN) self-aborts via train_lora's divergence guard, logging species_f1=0 ->
-# culled at the epoch-7 bracket regardless.
-early_terminate:
-  type: hyperband
-  min_iter: 7
-  eta: 3
+# NO hyperband. It ranks trials on LEVEL at a fixed step, so it repeatedly killed runs that were
+# still CLIMBING steeply — just behind their peers at the bracket (esp. onecycle, whose 6-epoch
+# ramp leaves it behind warmupcos at any early bracket). Instead, train_lora does PER-TRIAL
+# PLATEAU early-stop (--early-stop-patience below): each run is judged on ITS OWN trajectory and
+# only stops once eval/seen/species_f1 has been flat for N evals — a climber never stops.
+# A diverged trial (NaN) still self-aborts via train_lora's divergence guard (logs species_f1=0).
 
 parameters:
   # CAPACITY PINNED to the E0c baseline (r=32; E0c passed lora_alpha=None -> alpha defaults to
@@ -111,6 +100,8 @@ command:
   - --seed=0
   - --compile
   - --eval-epochs=1.0
+  - --early-stop-patience=4      # stop a trial only after 4 flat evals (climbers never stop)
+  - --early-stop-min-delta=0.002
   - --num-workers=8
   - --wandb-project=hyperbolic-plankton-sweep
   - ${args}   # swept: lr, wd, scheduler (lora_r/alpha PINNED to 32 = E0c baseline capacity)
