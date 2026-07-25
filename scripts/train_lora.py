@@ -497,7 +497,14 @@ def main():
                     help="warm-start: load trainable (adapter+final-LN+geometry) weights from "
                          "this checkpoint before training. Optimizer/scheduler NOT restored "
                          "(re-warm in a few hundred steps); pair with --scheduler constant.")
-    ap.add_argument("--num-workers", type=int, default=6)
+    ap.add_argument("--num-workers", "--num_workers", type=int, default=6,
+                    help="dataloader workers PER RANK. On DDP the real process count is "
+                         "num_workers*world, so keep it near (CPUs/world), not CPUs — e.g. "
+                         "8-CPU pod, 4 GPUs -> 2. Too many oversubscribe and thrash.")
+    ap.add_argument("--prefetch-factor", "--prefetch_factor", type=int, default=4,
+                    help="batches each worker stages ahead (torch default 2). Higher hides "
+                         "decode latency so fewer workers keep the GPU fed. Only used when "
+                         "num_workers>0.")
     ap.add_argument("--ckpt-every", type=int, default=None,
                     help="checkpoint every N steps. Default (None) = once per epoch "
                          "(derived from steps_per_epoch), so it* checkpoints land on epoch "
@@ -651,10 +658,16 @@ def main():
 
     collate = TaxonomyCollator(model.preprocess, ranks=ranks)
     sampler = DistributedSampler(train_ds, shuffle=True, seed=0) if ddp else None
+    # Dataloader is CPU-bound: each item does JPEG-decode + the CLIP preprocess (resize/crop/
+    # normalize) in the collate fn on the worker procs. num_workers is PER-RANK, so on DDP the
+    # real process count is num_workers*world — keep num_workers*world near the pod's CPU count,
+    # not over it (oversubscription thrashes). prefetch_factor lets each worker stage batches
+    # ahead so fewer workers still keep the GPU fed.
     loader = DataLoader(
         train_ds, batch_size=args.micro_bs, sampler=sampler, shuffle=(sampler is None),
         num_workers=args.num_workers, collate_fn=collate, drop_last=True,
-        pin_memory=True, persistent_workers=True,
+        pin_memory=True, persistent_workers=(args.num_workers > 0),
+        prefetch_factor=(args.prefetch_factor if args.num_workers > 0 else None),
     )
 
     # Length in OPTIMIZER STEPS: --epochs (default, paper-faithful) -> epochs * steps/epoch,
