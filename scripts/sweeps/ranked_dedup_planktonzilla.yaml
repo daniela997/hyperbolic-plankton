@@ -8,20 +8,20 @@
 # FIXED (not swept): euclidean, no-proj, ranked-dedup, 12+12 LoRA blocks, batch 2048
 # (micro-bs 512 x accum 1 x 4 GPUs — cross-GPU gather gives the full 2048 negatives; accum=1
 # = exact gradient, so NO --cache-accum-cl). 20 epochs. tau schedule at defaults (0.1/0.5).
-# SWEPT: lr 5e-5..2.5e-4, wd {1e-4,1e-2,2e-1}, scheduler {onecycle,warmupcos}.
-# PINNED: lora_r=32, lora_alpha=32 — matched to the E0c plain-CL baseline so the comparison
-# isolates the LOSS, not capacity (see the lora_r comment below).
+# SWEPT: lr 5e-5..2.5e-4, wd {1e-4, 1e-2, 2e-1}. Just the two optimizer knobs this round.
+# PINNED: lora_r=lora_alpha=32 (E0c capacity), scheduler=onecycle, batch 2048 (512x1x4 GPUs).
 #
-# NOTE: this config is for the FIXED loss (commit 5a3abbc, ragged self-match). Earlier sweeps
-# tuned a broken objective where truncated lineages never self-matched at full depth — their
-# rankings are not reliable guides.
+# NOTE: this config is for the DOUBLY-FIXED loss (commit 8e6144f): (1) ragged self-match
+# 5a3abbc + (2) ranked_infonce no longer drops confidently-wrong queries at the finest level
+# 8e6144f. ALL earlier sweeps tuned a broken objective (the second bug made the finest level
+# train only on already-correct examples), so NONE of their rankings — including the "best"
+# 0.612 — are reliable. Re-sweep from scratch.
 #
-# THE COMPARISON: E0c plain-CL baseline (run 0o1s0wpx) = r32/alpha32(default)/wd0.2/lr1e-4/
-# warmupcos/batch768 -> FULL-SPLIT test/seen/species_f1 0.634. Best ranked-dedup so far
-# (r6h04z4f/1lsy24y1, r64/a64/wd1e-4/lr5.03e-5/batch2048) = 0.6245 — but that run had 2x the
-# capacity and a larger rsLoRA step, so the -0.01 gap was NOT attributable to the loss. With
-# capacity pinned here, a win/loss vs 0.634 is a statement about ranked-dedup itself.
-# CAVEAT still open: batch differs (this sweep runs 2048 via 512x1x4 GPUs vs E0c's 768).
+# THE COMPARISON: E0c plain-CL baseline (run 0o1s0wpx, r32/a32/warmupcos/batch768) -> FULL-SPLIT
+# test/seen/species_f1 0.6418. With capacity pinned to E0c, a win/loss on test/seen/species_f1
+# vs 0.6418 is a statement about the LOSS. Remaining confound: batch (2048 here vs E0c's 768) —
+# but the batch-768 matched run undertrained (still climbing at ep20), so 2048/20ep is the
+# regime where BOTH losses converge; keep it.
 #
 # Metric: eval/seen/species_f1 (the headline rank the starvation hit). bayes search.
 #
@@ -47,33 +47,20 @@ metric:
 # A diverged trial (NaN) still self-aborts via train_lora's divergence guard (logs species_f1=0).
 
 parameters:
-  # CAPACITY PINNED to the E0c baseline (r=32; E0c passed lora_alpha=None -> alpha defaults to
-  # r=32). Capacity is the STRUCTURAL knob — it changes model expressiveness, so leaving it free
-  # made the ranked-dedup-vs-E0c comparison unattributable (the 0.6245 run used r64/a64, i.e. 2x
-  # capacity AND a 41% larger rsLoRA step, alpha/sqrt(r) = 8.0 vs E0c's 5.66). Pinning it to E0c's
-  # value isolates the LOSS. lr/wd/scheduler stay swept: those are optimizer settings a different
-  # loss may legitimately want tuned differently.
-  lora_r:
-    values: [32]
-  lora_alpha:
-    values: [32]
-  # lr NARROWED to 5e-5..2.5e-4 from evidence: the post-fix winner is 9.97e-05 (test 0.608), and
-  # pre-fix everything >=3.7e-4 collapsed (0.45/0.41/0.23) while the whole top-6 sat in
-  # 6.6e-5..2.0e-4. No trial above 2.5e-4 has ever finished well, so stop spending trials there.
-  # (E0c's own lr was 1e-4 — inside this range.)
+  # ONLY lr and wd this round. Everything else pinned (lora_r/alpha=32 to E0c capacity, scheduler
+  # =onecycle in the command, batch 2048). The prior "best" scheduler/lr were found under the buggy
+  # loss so aren't trusted — but pinning onecycle keeps the sweep small and it's E0c-comparable;
+  # revisit scheduler in a follow-up if lr/wd tuning doesn't reach the 0.6418 bar.
+  # lr range 5e-5..2.5e-4: E0c's lr (1e-4) is inside it; sweeps have repeatedly shown >~3e-4
+  # collapses and the optimum sits mid-range. The loss dynamics changed with 8e6144f, so bayes
+  # re-explores within this range.
   lr:
     distribution: log_uniform_values
     min: 5.0e-5
     max: 2.5e-4
-  # wd 0.2 RE-ADDED (it is E0c's value): it scored poorly for ranked-dedup before, but with
-  # capacity now pinned to the baseline we want to know whether ranked-dedup can win at the
-  # baseline's own wd, not just at its preferred one. Keep the two that produced winners too.
+  # wd: 1e-4 (ranked-dedup's prior best) .. 1e-2 .. 2e-1 (E0c's value).
   wd:
     values: [1.0e-4, 1.0e-2, 2.0e-1]
-  scheduler:
-    values: [warmupcos, onecycle]      # keep both: warmupcos is the only post-fix survivor and
-                                       # took 4 of the pre-fix top-6, but 1 survivor is thin
-                                       # evidence — let bayes confirm rather than pre-decide.
 
 command:
   - ${env}
@@ -90,8 +77,11 @@ command:
   - --epochs=20
   - --micro-bs=512
   - --accum=1
+  - --lora-r=32                  # PINNED: E0c capacity
+  - --lora-alpha=32              # PINNED: E0c capacity (E0c's default alpha=r=32)
   - --lora-visual-blocks=12
   - --lora-text-blocks=12
+  - --scheduler=onecycle         # PINNED this round (led last sweep; E0c-comparable)
   - --warmup-frac=0.1
   - --onecycle-pct-start=0.3
   - --onecycle-min-lr=1e-6
@@ -102,6 +92,7 @@ command:
   - --eval-epochs=1.0
   - --early-stop-patience=4      # stop a trial only after 4 flat evals (climbers never stop)
   - --early-stop-min-delta=0.002
-  - --num-workers=8
+  - --num-workers=2              # PER-RANK; 2x4 GPUs = 8 procs = the 8 pod CPUs (8 would give 32!)
+  - --prefetch-factor=6
   - --wandb-project=hyperbolic-plankton-sweep
-  - ${args}   # swept: lr, wd, scheduler (lora_r/alpha PINNED to 32 = E0c baseline capacity)
+  - ${args}   # swept: lr, wd only (everything else pinned above)
