@@ -473,3 +473,27 @@ def test_shared_depth_exact_lineage_is_full_depth_ragged():
     deeper_same_genus = torch.tensor([[1, 2, 3, 4, 5, 9, 7]])  # species-deep in that genus
     assert int(Lo.shared_depth_matrix(q, other_genus)[0, 0]) == 5
     assert int(Lo.shared_depth_matrix(q, deeper_same_genus)[0, 0]) == 6
+
+
+def test_ranked_infonce_penalises_confident_wrong():
+    """The `has_pos` (not `pos_mass>eps`) guard: a query that puts ~0 mass on its own-class
+    positive (confidently wrong) must get a LARGE loss, not be silently dropped. Regression for
+    the bug where misaligning every image to the wrong class gave loss 0.0 (== aligned)."""
+    R = 7
+    lin = torch.tensor([[1, 2, 3, 4, 5, 6, 10],
+                        [1, 2, 3, 4, 5, 6, 20],
+                        [1, 2, 3, 4, 5, 7, 30]])
+    torch.manual_seed(0)
+    text = torch.randn(3, 16)
+    depth = Lo.shared_depth_matrix(lin, lin)
+
+    def infonce(img):
+        import torch.nn.functional as F
+        sim = 30.0 * F.normalize(img, dim=-1) @ F.normalize(text, dim=-1).T
+        return float(Lo.ranked_infonce(sim, depth, max_depth=R))
+
+    aligned = infonce(text.clone())                         # image on its own class
+    misaligned = infonce(text[torch.tensor([1, 2, 0])].clone())  # each image on the WRONG class
+    random = infonce(torch.randn(3, 16))
+    assert aligned < random < misaligned, (aligned, random, misaligned)
+    assert misaligned > aligned + 1.0, "confident-wrong must incur a large penalty, not ~0"

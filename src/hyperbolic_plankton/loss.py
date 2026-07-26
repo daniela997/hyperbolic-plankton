@@ -585,9 +585,16 @@ def ranked_infonce(sim, depth, max_depth, min_tau=0.1, max_tau=0.5, one_per_rank
         logits = sim.masked_fill(depth > d, float("-inf"))
         tau = min_tau + (1.0 - d / max_depth) * (max_tau - min_tau)  # coarser rank -> higher tau
         pos_mass = (F.softmax(logits / tau, dim=1) * (depth == d)).sum(dim=1)  # [Q]
-        valid = pos_mass > eps                             # queries with >=1 rank-d positive
-        if valid.any():
-            total = total - torch.log(pos_mass[valid]).mean()  # valid guards log(0); no +eps
+        # Include a query iff a rank-d positive EXISTS for it (structural), NOT iff its positive
+        # got non-negligible mass. The old `pos_mass > eps` guard conflated the two: a query that
+        # placed ~0 mass on its own-class positive (model CONFIDENTLY WRONG) underflowed and got
+        # DROPPED — so the finest level trained only on already-correct examples and never
+        # penalised the hard wrong ones. Clamp for log-safety instead of dropping, so pos_mass->0
+        # yields the large -log(eps) penalty (the corrective gradient) it should.
+        has_pos = (depth == d).any(dim=1)                  # [Q]: a rank-d positive exists
+        if has_pos.any():
+            pm = pos_mass[has_pos].clamp_min(eps)
+            total = total - torch.log(pm).mean()
             n_terms += 1
     return total / max(n_terms, 1)
 
