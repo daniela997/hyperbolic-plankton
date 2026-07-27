@@ -1,0 +1,102 @@
+# ranked-dedup + PARTICIPATION level weighting on Planktonzilla (euclidean, no-proj), 4x A6000.
+#
+# THE ONE CHANGE vs sweep v4 (`ranked_dedup_planktonzilla.yaml`, sweep daiqxa8h):
+#   --rince-level-weight=participation
+# Everything else — lr/wd ranges, r=32/alpha=32, onecycle, batch 2048, 20 epochs, plateau
+# early-stop, seed 0 — is IDENTICAL, so this sweep is a controlled A/B against daiqxa8h's runs.
+#
+# WHY (measured, not assumed). On a real 2048-image batch (170 deduped prototypes) scored with
+# daiqxa8h's trained r=32 checkpoint, the per-level gradient share under the CURRENT (uniform)
+# weighting is:
+#     d=7  100.0% of batch -> 33.1%      d=4  48.7% -> 6.5%      d=1  97.6% -> 0.6%
+#     d=6   11.5% of batch -> 29.3%      d=3  87.2% -> 4.1%
+#     d=5   23.3% of batch -> 23.3%      d=2  66.1% -> 3.1%
+# d=6 and d=5 take 52.6% of the gradient while serving under a quarter of the batch. Cause: the
+# per-level mean() averages over only the PARTICIPATING queries, then all levels are averaged
+# equally — so a rare level is promoted to parity and each participant gets ~8x the pull. d=6 is
+# "pull same-genus different-species together", i.e. the term that directly opposes the species
+# discrimination species_f1 measures, and it lands on the species-deep images (6.5% of the batch)
+# that are the only ones species_f1 can score.
+# `participation` sums over queries / Q, so each level's weight IS its batch coverage.
+# Fine-level gradient share 33.1% -> 64.5%. No new hyperparameter; closer to RINCE Eq. 5 (which
+# sums over queries — the per-level mean was our addition to handle empty levels).
+#
+# LR RANGE IS WIDENED DOWNWARD ON PURPOSE. `participation` drops the /n_terms division, so the
+# loss magnitude is ~n_terms x larger (measured 15.23 vs 5.66 on a synthetic batch). That is a
+# real change in effective step size, not just a bigger logged number — so the optimum lr should
+# be LOWER than uniform's. Range extended to 2e-5 (v4's floor was 5e-5) so bayes can reach it; a
+# null result at v4's range alone would be ambiguous between "weighting doesn't help" and
+# "weighting needed a smaller lr". Upper bound kept at 2.5e-4: >~3e-4 has repeatedly collapsed.
+#
+# THE COMPARISON: daiqxa8h (uniform, same everything else) reached eval/seen/species_f1
+# 0.6749 / 0.6905 / 0.6941 / 0.7044. Beating that band is the bar. NOTE eval/* inflates over
+# full-split test/* by ~0.07-0.13, so 0.70 eval is NOT a win over E0c's 0.6418 full-split test —
+# confirm any winner with scripts/final_eval.py before claiming one.
+#
+# CLUSTER USAGE (in the pod; venv at /root/hp-venv, cache staged at /root/pz_cache):
+#   cd /mnt/resources/hyperbolic-plankton && git pull --ff-only
+#   export HP_CACHE=/root/pz_cache HP_SPLIT_DIR=/mnt/indices/hyperbolic_plankton_splits \
+#          HP_CKPT_DIR=/mnt/resources/hyperbolic_plankton_ckpts HP_WANDB_DIR=/mnt/resources/wandb
+#   /root/hp-venv/bin/wandb sweep --project hyperbolic-plankton-sweep \
+#       scripts/sweeps/ranked_dedup_participation_planktonzilla.yaml
+#   /root/hp-venv/bin/wandb agent uofg/hyperbolic-plankton-sweep/<id>
+
+program: scripts/train_lora.py
+method: bayes
+metric:
+  name: eval/seen/species_f1
+  goal: maximize
+
+# NO hyperband — it ranks trials on LEVEL at a fixed step and repeatedly killed runs that were
+# still CLIMBING (esp. onecycle, whose 6-epoch ramp leaves it behind warmupcos at any early
+# bracket). train_lora does PER-TRIAL PLATEAU early-stop instead (--early-stop-patience): each
+# run is judged on its OWN trajectory and stops only once the metric has been flat for N evals,
+# so a climber never stops. A diverged trial (NaN) self-aborts via the divergence guard.
+
+parameters:
+  # Same two knobs as v4, so the A/B stays clean. lr floor lowered to 2e-5 (see header: the
+  # participation normalisation raises the loss magnitude ~n_terms x, so the optimum should sit
+  # lower than uniform's).
+  lr:
+    distribution: log_uniform_values
+    min: 2.0e-5
+    max: 2.5e-4
+  # wd: 1e-4 (ranked-dedup's prior best) .. 1e-2 .. 2e-1 (E0c's value, and daiqxa8h's top two).
+  wd:
+    values: [1.0e-4, 1.0e-2, 2.0e-1]
+
+command:
+  - ${env}
+  - /root/hp-venv/bin/torchrun
+  - --nproc_per_node=4
+  - --master_port=29574        # differs from v4's 29573 so a stale v4 agent can't collide
+  - ${program}
+  - --dataset=planktonzilla
+  - --backbone=clip
+  - --geometry=euclidean
+  - --contrastive=ranked-dedup
+  - --rince-level-weight=participation   # <-- THE ONLY CHANGE vs sweep v4 / daiqxa8h
+  - --rince-sim=distance
+  - --no-proj
+  - --epochs=20
+  - --micro-bs=512
+  - --accum=1
+  - --lora-r=32                  # PINNED: E0c capacity
+  - --lora-alpha=32              # PINNED: E0c capacity (E0c's default alpha=r=32)
+  - --lora-visual-blocks=12
+  - --lora-text-blocks=12
+  - --scheduler=onecycle         # PINNED (led v4; E0c-comparable)
+  - --warmup-frac=0.1
+  - --onecycle-pct-start=0.3
+  - --onecycle-min-lr=1e-6
+  - --lambda-cl=1.0
+  - --lambda-sel=0.0
+  - --seed=0
+  - --compile
+  - --eval-epochs=1.0
+  - --early-stop-patience=4      # stop a trial only after 4 flat evals (climbers never stop)
+  - --early-stop-min-delta=0.002
+  - --num-workers=2              # PER-RANK; 2x4 GPUs = 8 procs = the 8 pod CPUs (8 would give 32!)
+  - --prefetch-factor=6
+  - --wandb-project=hyperbolic-plankton-sweep
+  - ${args}   # swept: lr, wd only (everything else pinned above)
