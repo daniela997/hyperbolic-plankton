@@ -174,7 +174,7 @@ def ranked_contrastive_loss_ddp(
 
 def ranked_dedup_symmetric_loss_ddp(
     img, text, lineage_ids, curv, scale, kind="distance",
-    max_depth=4, min_tau=0.1, max_tau=0.5,
+    max_depth=4, min_tau=0.1, max_tau=0.5, level_weight="uniform",
 ):
     """Ragged-aware RINCE: full-bank depth-graded negatives + DEDUP-to-prototypes + SYMMETRIC T->I.
 
@@ -218,7 +218,8 @@ def ranked_dedup_symmetric_loss_ddp(
     if kind == "angle":
         sim_i2t = -sim_i2t
     depth_i2t = shared_depth_matrix(lineage_ids, proto_lin)    # [B, P]
-    i2t = ranked_infonce(sim_i2t, depth_i2t, max_depth=max_depth, min_tau=min_tau, max_tau=max_tau)
+    i2t = ranked_infonce(sim_i2t, depth_i2t, max_depth=max_depth, min_tau=min_tau, max_tau=max_tau,
+                         level_weight=level_weight)
 
     # T->I: prototype queries vs the FULL gathered image bank, graded by shared depth (symmetric).
     # proto_text has grad only through prototypes whose first_row is a LOCAL image; that's the
@@ -227,7 +228,8 @@ def ranked_dedup_symmetric_loss_ddp(
     if kind == "angle":
         sim_t2i = -sim_t2i
     depth_t2i = shared_depth_matrix(proto_lin, all_lin)        # [P, N]
-    t2i = ranked_infonce(sim_t2i, depth_t2i, max_depth=max_depth, min_tau=min_tau, max_tau=max_tau)
+    t2i = ranked_infonce(sim_t2i, depth_t2i, max_depth=max_depth, min_tau=min_tau, max_tau=max_tau,
+                         level_weight=level_weight)
 
     return 0.5 * (i2t + t2i)
 
@@ -557,7 +559,8 @@ def shared_depth_matrix(query_lineages, bank_lineages):
     return torch.where(same_class, torch.full_like(depth, query_lineages.shape[1]), depth)
 
 
-def ranked_infonce(sim, depth, max_depth, min_tau=0.1, max_tau=0.5, one_per_rank=True, eps=1e-7):
+def ranked_infonce(sim, depth, max_depth, min_tau=0.1, max_tau=0.5, one_per_rank=True, eps=1e-7,
+                   level_weight="uniform"):
     """RINCE-in (Hoffmann 2022, sum_in_log) over taxonomic shared-depth ranks.
 
     Ported from /home/daniela/other/rince/losses.py (sum_in_log + the per-rank loop), with their
@@ -576,9 +579,29 @@ def ranked_infonce(sim, depth, max_depth, min_tau=0.1, max_tau=0.5, one_per_rank
     tau per level: linear in dissimilarity (their get_dynamic_tau): sim_level = d/max_depth,
     tau = min_tau + (1 - sim_level)*(max_tau - min_tau) -> coarser ranks get higher tau.
     `one_per_rank=True` = one loss term per distinct depth level (their best variant).
+
+    `level_weight` — how the per-level terms combine:
+      "uniform"       : mean over PARTICIPATING queries per level, then mean over levels (RINCE
+                        as originally ported). On RAGGED data this over-weights rare levels: a
+                        level only 11.5% of the batch participates in is averaged to parity with
+                        one all queries share, so each participating query gets ~8x the pull.
+                        Measured on a real 2048 batch (170 protos, trained r=32 ckpt): d=6 serves
+                        11.5% of queries but takes 29.3% of the gradient, d=5 serves 23.3% and
+                        takes 23.3% — together 52.6% of the gradient on <1/4 of the batch. d=6 is
+                        "pull same-genus different-species together", i.e. the term that directly
+                        opposes the species discrimination species_f1 measures, and it lands on the
+                        species-deep images (6.5% of the batch) that are the only ones it can score.
+      "participation" : sum over queries / Q, so each level's contribution scales with how much of
+                        the batch actually participates in it. Closer to RINCE Eq. 5 (which sums
+                        over queries; the per-level mean was our addition for empty levels) and
+                        needs no extra hyperparameter. Same measurement: fine-level gradient share
+                        33.1% -> 64.5%.
     """
+    if level_weight not in ("uniform", "participation"):
+        raise ValueError(f"level_weight must be 'uniform' or 'participation', got {level_weight!r}")
     total = sim.new_zeros(())
     n_terms = 0
+    Q = sim.shape[0]
     for d in range(max_depth, 0, -1):
         # level d: positives = {depth==d}; denominator = positives + everything LESS similar
         # (depth<d, incl. true negatives). Items MORE similar (depth>d) -> -inf (excluded from both).
@@ -594,9 +617,14 @@ def ranked_infonce(sim, depth, max_depth, min_tau=0.1, max_tau=0.5, one_per_rank
         has_pos = (depth == d).any(dim=1)                  # [Q]: a rank-d positive exists
         if has_pos.any():
             pm = pos_mass[has_pos].clamp_min(eps)
-            total = total - torch.log(pm).mean()
+            nll = -torch.log(pm)
+            # "uniform": mean over participants (then /n_terms below) — every level equal.
+            # "participation": sum over participants / Q — level weight = its batch coverage.
+            total = total + (nll.mean() if level_weight == "uniform" else nll.sum() / Q)
             n_terms += 1
-    return total / max(n_terms, 1)
+    # Only "uniform" divides by the level count; "participation" is already normalised by Q, and
+    # dividing again would re-introduce the rare-level promotion this option exists to remove.
+    return total / max(n_terms, 1) if level_weight == "uniform" else total
 
 
 def _cl_logits(kind, img, text, all_img, all_text, curv, scale):

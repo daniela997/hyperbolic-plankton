@@ -259,6 +259,7 @@ def forward_loss(model, pixel_values, taxonomy_batch, lambda_sel, stats=None,
                  sel_indep=True, contrastive="distance", ranks=RANKS,
                  sel_tau=1.0, sel_leak=0.0, sel_uncertainty=0.0, sel_margin=0.0, sel_neg_margin=0.0, cl_mask="none", lambda_cl=1.0,
                  geometry="hyperbolic", rince_min_tau=0.1, rince_max_tau=0.5, rince_sim="distance",
+                 rince_level_weight="uniform",
                  lrcl_ranks="all"):
     """lambda_cl*contrastive(img, deepest_text) + lambda_sel*SEL. `model` may be a DDP
     wrapper; geometry helpers live on the underlying module.
@@ -290,9 +291,11 @@ def forward_loss(model, pixel_values, taxonomy_batch, lambda_sel, stats=None,
         lineage = stable_lineage_ids(taxonomy_batch, ranks, img.device)
         rkind = "euclidean" if euclidean else rince_sim
         fn = ranked_dedup_symmetric_loss_ddp if contrastive == "ranked-dedup" else ranked_contrastive_loss_ddp
+        # level_weight is ranked-dedup only (plain `ranked` doesn't take it).
+        extra = {"level_weight": rince_level_weight} if contrastive == "ranked-dedup" else {}
         cl = fn(
             img, deepest, lineage, curv, scale, kind=rkind,
-            max_depth=len(ranks), min_tau=rince_min_tau, max_tau=rince_max_tau)
+            max_depth=len(ranks), min_tau=rince_min_tau, max_tau=rince_max_tau, **extra)
     elif contrastive == "level-restricted":
         # LRCL (Tao 2026): per-level InfoNCE, unique-label + group-balanced. lrcl_ranks="species"
         # = the generic single-level (unique-label group-balanced) baseline; "all" = full multi-rank.
@@ -412,6 +415,16 @@ def main():
                     help="ranked CL: tau at the coarsest level (relaxed). tau rises with rank "
                          "dissimilarity (RINCE get_dynamic_tau). ranked needs a big bank "
                          "(--cache-accum-cl) to populate fine ranks; see docs/rince-plan.md.")
+    ap.add_argument("--rince-level-weight", "--rince_level_weight",
+                    default="uniform", choices=["uniform", "participation"],
+                    help="ranked-dedup: how the per-level terms combine. 'uniform' = mean over "
+                         "participating queries then mean over levels (the original port). On "
+                         "RAGGED data that over-weights rare levels — measured on a real 2048 "
+                         "batch, d=6 serves 11.5%% of queries but takes 29.3%% of the gradient, "
+                         "and d=6 is the term that pulls same-genus different-species together, "
+                         "opposing species_f1. 'participation' = sum over queries / Q, so each "
+                         "level's weight is its batch coverage (fine-level gradient share "
+                         "33.1%% -> 64.5%%); no extra hyperparameter, closer to RINCE Eq. 5.")
     ap.add_argument("--cl-mask", default="none", choices=["none", "same"],
                     help="mask same-class off-diagonal CL negatives (true positives "
                          "mis-treated as negatives, ~4.4%% of plankton batch pairs). "
@@ -854,11 +867,13 @@ def main():
                         local_lin = torch.cat(cache_lin)  # [accum*mb, R]; fresh-vs-cached identical ids
                         rfn = (ranked_dedup_symmetric_loss_ddp
                                if args.contrastive == "ranked-dedup" else ranked_contrastive_loss_ddp)
+                        rextra = ({"level_weight": args.rince_level_weight}
+                                  if args.contrastive == "ranked-dedup" else {})
                         cl = rfn(
                             local_i, local_t, local_lin, core.curvature, core.logit_scale.exp(),
                             kind=("euclidean" if args.geometry == "euclidean" else args.rince_sim),
                             max_depth=len(ranks),
-                            min_tau=args.rince_min_tau, max_tau=args.rince_max_tau)
+                            min_tau=args.rince_min_tau, max_tau=args.rince_max_tau, **rextra)
                     else:
                         local_ids = (torch.cat(cache_ids[:micro] + [class_ids] + cache_ids[micro + 1:])
                                      if class_ids is not None else None)
@@ -935,6 +950,7 @@ def main():
                         cl_mask=args.cl_mask,
                         lambda_cl=args.lambda_cl, geometry=args.geometry,
                         rince_min_tau=args.rince_min_tau, rince_max_tau=args.rince_max_tau,
+                        rince_level_weight=args.rince_level_weight,
                         rince_sim=args.rince_sim, lrcl_ranks=args.lrcl_ranks,
                     )
                     loss = loss / args.accum

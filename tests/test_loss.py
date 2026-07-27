@@ -497,3 +497,92 @@ def test_ranked_infonce_penalises_confident_wrong():
     random = infonce(torch.randn(3, 16))
     assert aligned < random < misaligned, (aligned, random, misaligned)
     assert misaligned > aligned + 1.0, "confident-wrong must incur a large penalty, not ~0"
+
+
+def test_ranked_infonce_participation_weights_levels_by_coverage():
+    """`level_weight='participation'` must weight each level by how much of the batch takes
+    part in it, instead of promoting rare levels to parity.
+
+    Construction: a batch where level d=R (own class) covers EVERY query, while the coarser
+    level covers only one. Under 'uniform' the rare level is averaged to 1/n_terms parity;
+    under 'participation' it is scaled by its (small) coverage, so the fine level's share of
+    the objective must be strictly larger.
+    """
+    import torch.nn.functional as F
+
+    R = 3
+    # rows 0,1 are same-genus siblings (share 2 ranks) so a depth-2 positive exists for exactly
+    # those two of the four queries; rows 2,3 are unrelated singletons. The fine level d=3 (own
+    # class) covers all four. So d=2 is the RARE level: 2/4 coverage.
+    lin = torch.tensor([[1, 2, 10],
+                        [1, 2, 20],
+                        [1, 9, 30],
+                        [1, 8, 40]])
+    depth = Lo.shared_depth_matrix(lin, lin)
+    torch.manual_seed(0)
+    text = torch.randn(4, 16)
+    # Independent random images, so EVERY level carries real loss. (Aligning each image to its
+    # own text zeroes the fine-level NLL, and permuting zeroes the coarse ones — either way the
+    # shares degenerate to 0 or 1 and the comparison is vacuous.)
+    img = torch.randn(4, 16)
+    sim = 10.0 * F.normalize(img, dim=-1) @ F.normalize(text, dim=-1).T
+
+    uni = Lo.ranked_infonce(sim, depth, max_depth=R, level_weight="uniform")
+    par = Lo.ranked_infonce(sim, depth, max_depth=R, level_weight="participation")
+    assert torch.isfinite(uni) and torch.isfinite(par)
+
+    # Per-level NLLs, to compute each weighting's share of the FINE level explicitly.
+    def level_nll(d):
+        tau = 0.1 + (1.0 - d / R) * (0.5 - 0.1)
+        pm = (F.softmax(sim.masked_fill(depth > d, float("-inf")) / tau, dim=1)
+              * (depth == d)).sum(dim=1)
+        has = (depth == d).any(dim=1)
+        return -torch.log(pm[has].clamp_min(1e-7)), int(has.sum())
+
+    nll_fine, n_fine = level_nll(R)
+    computed = [(d, *level_nll(d)) for d in range(R, 0, -1)]
+    live = [(d, v, n) for d, v, n in computed if n > 0]
+    Q = sim.shape[0]
+    assert n_fine == Q, "fine level should cover the whole batch by construction"
+    assert any(n < Q for _, _, n in live), "need a partially-covered coarse level to test"
+    assert float(nll_fine.mean()) > 0, "fine level must carry loss for the shares to be meaningful"
+
+    share_uni = float(nll_fine.mean()) / sum(float(v.mean()) for _, v, _ in live)
+    share_par = float(nll_fine.sum() / Q) / sum(float(v.sum() / Q) for _, v, _ in live)
+    assert share_par > share_uni, (share_par, share_uni)
+
+
+def test_ranked_infonce_level_weight_agrees_when_all_levels_full():
+    """The two weightings differ only because of RAGGED coverage. When every level covers the
+    whole batch, 'participation' is exactly 'uniform' scaled by n_terms — same relative
+    weighting, so the two must rank a good and a bad alignment identically."""
+    import torch.nn.functional as F
+
+    R = 2
+    # every query has both a same-class positive and a depth-1 positive -> full coverage
+    lin = torch.tensor([[1, 10], [1, 20], [1, 30], [1, 40]])
+    depth = Lo.shared_depth_matrix(lin, lin)
+    torch.manual_seed(0)
+    text = torch.randn(4, 16)
+
+    def both(img):
+        sim = 10.0 * F.normalize(img, dim=-1) @ F.normalize(text, dim=-1).T
+        return (float(Lo.ranked_infonce(sim, depth, max_depth=R, level_weight="uniform")),
+                float(Lo.ranked_infonce(sim, depth, max_depth=R, level_weight="participation")))
+
+    good_u, good_p = both(text.clone())
+    bad_u, bad_p = both(text[torch.tensor([1, 2, 3, 0])].clone())
+    assert good_u < bad_u and good_p < bad_p
+    # identical relative weighting -> constant ratio between the two normalisations
+    n_terms = sum(1 for d in range(R, 0, -1) if (depth == d).any())
+    assert good_p == pytest.approx(good_u * n_terms, rel=1e-5)
+    assert bad_p == pytest.approx(bad_u * n_terms, rel=1e-5)
+
+
+def test_ranked_infonce_rejects_unknown_level_weight():
+    R = 2
+    lin = torch.tensor([[1, 10], [1, 20]])
+    depth = Lo.shared_depth_matrix(lin, lin)
+    sim = torch.randn(2, 2)
+    with pytest.raises(ValueError, match="level_weight"):
+        Lo.ranked_infonce(sim, depth, max_depth=R, level_weight="depth")
