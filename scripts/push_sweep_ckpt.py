@@ -19,6 +19,7 @@ whose rankings tuned a broken objective and are not comparable.
 
 import argparse
 import glob
+import json
 import os
 import sys
 
@@ -27,6 +28,42 @@ import wandb
 ENTITY = os.environ.get("WANDB_ENTITY", "uofg")
 PROJECT = os.environ.get("WANDB_PROJECT", "hyperbolic-plankton-sweep")
 CKPT_DIR = os.environ.get("HP_CKPT_DIR", "/mnt/resources/hyperbolic_plankton_ckpts")
+
+
+def _raw_summary(run) -> dict:
+    """The run's summary as a flat {key: value} dict with slashed keys intact.
+
+    `run.summary` is an old-style wrapper whose `.get()` treats "/" as a nesting separator.
+    Its `_json_dict` is a JSON *string* on some wandb versions and a dict on others, so
+    handle both, and fall back to iterating the wrapper's own keys.
+    """
+    jd = getattr(run.summary, "_json_dict", None)
+    if isinstance(jd, str):
+        try:
+            return json.loads(jd)
+        except json.JSONDecodeError:
+            pass
+    elif isinstance(jd, dict):
+        return dict(jd)
+    return {k: run.summary[k] for k in run.summary.keys()}
+
+
+def _raw_config(run) -> dict:
+    """The run's config as a flat {key: value} dict.
+
+    `run.config` is a JSON *string* on some wandb versions (and a dict on others), and in
+    the string form every entry is wrapped as {"value": ...}, so unwrap that too.
+    """
+    cfg = run.config
+    if isinstance(cfg, str):
+        try:
+            cfg = json.loads(cfg)
+        except json.JSONDecodeError:
+            return {}
+    if not isinstance(cfg, dict):
+        return {}
+    return {k: (v["value"] if isinstance(v, dict) and "value" in v else v)
+            for k, v in cfg.items()}
 
 
 def main() -> None:
@@ -50,35 +87,53 @@ def main() -> None:
 
     # Rank by the summary metric. Runs that never logged it (crashed early, still starting)
     # are skipped rather than treated as 0 — a 0 would outrank nothing but clutters the list.
-    scored = []
+    #
+    # Read the raw summary dict, NOT `summary.get(key)`: wandb's old Summary wrapper splits a
+    # slashed key like "eval/seen/species_f1" on "/" and walks it as a nested path, raising
+    # TypeError the moment it hits a string value. The raw summary has the slashed key
+    # verbatim, which is how it was logged.
+    scored, unscored = [], []
     for r in sweep.runs:
-        v = r.summary.get(args.metric)
-        if v is None:
+        summary = _raw_summary(r)
+        v = summary.get(args.metric)
+        if not isinstance(v, (int, float)):
+            unscored.append(r)
             continue
-        scored.append((float(v), r))
+        scored.append((float(v), r, summary))
     if not scored:
-        sys.exit(f"no run in {args.sweep_id} has summary metric '{args.metric}'")
+        print(f"no run in {args.sweep_id} has summary metric '{args.metric}'.")
+        if unscored:
+            r = unscored[0]
+            keys = sorted(_raw_summary(r))
+            print(f"keys present on run {r.id} ({r.state}):")
+            for k in keys:
+                print(f"    {k}")
+        sys.exit(1)
     scored.sort(key=lambda t: -t[0])
 
-    print(f"\ntop runs by {args.metric}:")
-    for v, r in scored[:8]:
-        lr = r.config.get("lr")
+    print(f"\nruns by {args.metric}:")
+    for v, r, _ in scored:
+        cfg = _raw_config(r)
+        lr = cfg.get("lr")
         lr_s = f"{lr:.3e}" if isinstance(lr, (int, float)) else str(lr)
-        print(f"  {v:.4f}  {r.id}  {r.state:9s}  lr={lr_s}  wd={r.config.get('wd')}  "
-              f"r={r.config.get('lora_r')}  {r.config.get('tag', '')}")
+        print(f"  {v:.4f}  {r.id}  {r.state:9s}  lr={lr_s}  wd={cfg.get('wd')}  "
+              f"r={cfg.get('lora_r')}  {cfg.get('tag', '')}")
+    for r in unscored:
+        print(f"  {'—':>6}  {r.id}  {r.state:9s}  (no {args.metric} in summary)")
 
-    best_v, best = scored[0]
-    lr = best.config.get("lr")
+    best_v, best, best_summary = scored[0]
+    best_cfg = _raw_config(best)
+    lr = best_cfg.get("lr")
     lr_s = f"{lr:.3e}" if isinstance(lr, (int, float)) else str(lr)
     print(f"\nBEST: {best.id}  {args.metric}={best_v:.4f}")
-    print(f"  config: lr={lr_s} wd={best.config.get('wd')} "
-          f"lora_r={best.config.get('lora_r')} alpha={best.config.get('lora_alpha')} "
-          f"sched={best.config.get('scheduler')} contrastive={best.config.get('contrastive')}")
-    print(f"  summary: seen/species_f1={best.summary.get('eval/seen/species_f1')} "
-          f"unseen_mean={best.summary.get('eval/unseen/mean_f1')}")
+    print(f"  config: lr={lr_s} wd={best_cfg.get('wd')} "
+          f"lora_r={best_cfg.get('lora_r')} alpha={best_cfg.get('lora_alpha')} "
+          f"sched={best_cfg.get('scheduler')} contrastive={best_cfg.get('contrastive')}")
+    print(f"  summary: seen/species_f1={best_summary.get('eval/seen/species_f1')} "
+          f"unseen_mean={best_summary.get('eval/unseen/mean_f1')}")
 
     # train_lora saves to {CKPT_DIR}/{tag}__{run_id}/{tag}_best.pt
-    tag = best.config.get("tag", "bioclip_lora")
+    tag = best_cfg.get("tag") or "bioclip_lora"
     cand = os.path.join(args.ckpt_dir, f"{tag}__{best.id}", f"{tag}_best.pt")
     if not os.path.exists(cand):
         hits = glob.glob(os.path.join(args.ckpt_dir, f"*__{best.id}", "*_best.pt"))
@@ -104,7 +159,7 @@ def main() -> None:
         description=f"best of sweep {args.sweep_id} by {args.metric}={best_v:.4f} (run {best.id})",
         metadata={
             "sweep": args.sweep_id, "run_id": best.id, args.metric: best_v,
-            **{k: best.config.get(k) for k in
+            **{k: best_cfg.get(k) for k in
                ("lr", "wd", "lora_r", "lora_alpha", "scheduler", "contrastive",
                 "geometry", "micro_bs", "accum", "epochs", "rince_min_tau", "rince_max_tau")},
         },
